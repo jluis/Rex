@@ -3,8 +3,10 @@ use warnings;
 
 use Cwd 'getcwd';
 my $cwd = getcwd;
+use File::Spec;
+use File::Temp;
 
-use Test::More tests => 55;
+use Test::More tests => 61;
 
 use Rex::Commands::File;
 use Rex::Commands::Fs;
@@ -44,7 +46,7 @@ file(
 );
 
 my %stats = Rex::Commands::Fs::stat($filename);
-if ( is_windows() && !can_run('chmod') ) {
+if ( is_windows() && $^O ne "cygwin" ) {
   is( $stats{mode}, "0666", "windows without chmod" );
 }
 else {
@@ -106,26 +108,35 @@ append_if_no_such_line( $filename, 'KEY="VAL"' );
 $content = cat($filename);
 like( $content, qr/KEY="VAL"/ms, "found KEY=VAL" );
 
+my $no_change = 0;
 append_if_no_such_line(
   $filename,
   "change",
   qr{change},
   on_change => sub {
     $changed = 0;
+  },
+  on_no_change => sub {
+    $no_change = 1;
   }
 );
 
-is( $changed, 1, "nothing was changed in the file" );
+is( $changed,   1, "nothing was changed in the file" );
+is( $no_change, 1, "no change handler triggered" );
 
 append_if_no_such_line(
   $filename,
   "change",
   on_change => sub {
     $changed = 0;
+  },
+  on_no_change => sub {
+    $no_change = 2;
   }
 );
 
-is( $changed, 1, "nothing was changed in the file without regexp" );
+is( $changed,   1, "nothing was changed in the file without regexp" );
+is( $no_change, 2, "no change handler triggered" );
 
 $content = cat($filename);
 unlike( $content, qr/foobar/ms, "not found foobar" );
@@ -317,6 +328,17 @@ file "$tmp_dir/test.d-$$", ensure => "directory";
 ok( -d "$tmp_dir/test.d-$$", "created directory with file()" );
 rmdir "$tmp_dir/test.d-$$";
 
+$changed = 0;
+file "$tmp_dir/test.d-$$",
+  ensure    => "directory",
+  on_change => sub {
+  $changed = 1;
+  };
+
+ok( $changed,                "on_change hook with directory" );
+ok( -d "$tmp_dir/test.d-$$", "created directory with file()" );
+rmdir "$tmp_dir/test.d-$$";
+
 $content = 'Hello this is <%= $::foo %>';
 is(
   template( \$content, __no_sys_info__ => 1 ),
@@ -330,3 +352,41 @@ is(
   "overwrite keys from Rex::Config"
 );
 
+subtest 'get temp file name' => sub {
+  my $testfile          = "temp-$$";
+  my $testfile_absolute = File::Spec->catfile( $tmp_dir, $testfile );
+
+  my %temp_file_for = (
+    $testfile          => ".rex.tmp.$testfile",
+    $testfile_absolute => File::Spec->catfile( $tmp_dir, ".rex.tmp.$testfile" ),
+  );
+
+  for my $filename ( sort keys %temp_file_for ) {
+    my $tempfile = Rex::Commands::File::get_tmp_file_name($filename);
+    is( $tempfile, $temp_file_for{$filename}, 'temp file name matches' );
+  }
+};
+
+TODO: {
+  local $TODO = 'on_change hook is triggered unconditionally on Windows'
+    if ( $^O =~ /MSWin/ );
+
+  subtest 'on_change hook with source option' => sub {
+    my $testfile1 = File::Temp->new()->filename;
+    my $testfile2 = File::Temp->new()->filename;
+
+    my $changed;
+
+    file $testfile1, content => 'change', on_change => sub { $changed += 1 };
+
+    is( $changed, 1, 'on_change when creating a new file with content' );
+
+    file $testfile2, source => $testfile1, on_change => sub { $changed += 1 };
+
+    is( $changed, 2, 'on_change when creating a new file with source' );
+
+    file $testfile2, source => $testfile1, on_change => sub { $changed += 1 };
+
+    is( $changed, 2, 'on_change when uploading the same file again' );
+  };
+}

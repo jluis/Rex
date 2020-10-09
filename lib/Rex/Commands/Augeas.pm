@@ -142,7 +142,10 @@ Remove an entry.
   elsif ( $action eq "remove" ) {
 
     # Code to run on a change being made
-    if ( $options[-2] eq 'on_change' && ref $options[-1] eq 'CODE' ) {
+    if ( $options[-2]
+      && $options[-2] eq 'on_change'
+      && ref $options[-1] eq 'CODE' )
+    {
       $on_change = pop @options;
       pop @options;
     }
@@ -166,7 +169,7 @@ Remove an entry.
       $changed = $result->{changed};
     }
     else {
-      $ret = $aug->save;
+      $ret     = $aug->save;
       $changed = 1 if $ret && $aug->get('/augeas/events/saved'); # Any files changed?
     }
 
@@ -193,7 +196,10 @@ Insert an item into the file. Here, the order of the options is important. If th
     delete $opts->{"label"};
 
     # Code to run on a change being made
-    if ( $options[-2] eq 'on_change' && ref $options[-1] eq 'CODE' ) {
+    if ( $options[-2]
+      && $options[-2] eq 'on_change'
+      && ref $options[-1] eq 'CODE' )
+    {
       $on_change = pop @options;
       pop @options;
     }
@@ -250,7 +256,7 @@ Insert an item into the file. Here, the order of the options is important. If th
         $aug->set( $_key, $val );
       }
 
-      $ret = $aug->save();
+      $ret     = $aug->save();
       $changed = 1 if $ret && $aug->get('/augeas/events/saved'); # Any files changed?
     }
   }
@@ -268,7 +274,7 @@ Dump the contents of a file to STDOUT.
     my $aug_key = $file;
 
     if ( $is_ssh || !$has_config_augeas ) {
-      my @list = run "augtool print $aug_key";
+      my @list = i_exec "augtool", "print", $aug_key;
       print join( "\n", @list ) . "\n";
     }
     else {
@@ -292,7 +298,7 @@ Check if an item exists.
     my $file = shift @options;
 
     my $aug_key = $file;
-    my $val = $options[0] || "";
+    my $val     = $options[0] || "";
 
     if ( $is_ssh || !$has_config_augeas ) {
       my @paths;
@@ -394,7 +400,7 @@ sub _run_augtool {
   $fh->write($_) foreach (@commands);
   $fh->close;
   my ( $return, $error ) = i_run "augtool --file $rnd_file --autosave",
-    sub { @_ };
+    sub { @_ }, fail_ok => 1;
   my $ret = $? == 0 ? 1 : 0;
 
   if ($ret) {

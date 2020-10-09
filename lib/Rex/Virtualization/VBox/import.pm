@@ -24,6 +24,9 @@ sub execute {
   my $dom = $arg1;
   Rex::Logger::debug( "importing: $dom -> " . $opt{file} );
 
+  $opt{cpus}   ||= 1;
+  $opt{memory} ||= 512;
+
   my $add_cmd = "";
 
   if ( exists $opt{cpus} ) {
@@ -38,7 +41,7 @@ sub execute {
     . $opt{file}
     . "\" --vsys 0 --vmname \""
     . $dom
-    . "\" $add_cmd 2>&1";
+    . "\" $add_cmd 2>&1", fail_ok => 1;
 
   if ( $? != 0 ) {
     die("Error importing VM $opt{file}");

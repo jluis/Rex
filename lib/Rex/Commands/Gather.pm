@@ -45,8 +45,8 @@ use vars qw(@EXPORT);
 
 @EXPORT = qw(operating_system_is network_interfaces memory
   get_operating_system operating_system operating_system_version operating_system_release
-  is_freebsd is_netbsd is_openbsd is_redhat is_linux is_bsd is_solaris is_suse is_debian is_mageia is_windows is_alt is_openwrt is_gentoo is_fedora
-  get_system_information dump_system_information);
+  is_freebsd is_netbsd is_openbsd is_redhat is_linux is_bsd is_solaris is_suse is_debian is_mageia is_windows is_alt is_openwrt is_gentoo is_fedora is_arch is_void
+  get_system_information dump_system_information kernelname);
 
 =head2 get_operating_system
 
@@ -88,6 +88,17 @@ sub get_system_information {
   return Rex::Helper::System::info();
 }
 
+=head2 kernelname
+
+Will return the kernel name of the operating system. For example on a linux system it will return I<Linux>.
+
+=cut
+
+sub kernelname {
+  my $host = Rex::Hardware::Host->get();
+  return $host->{kernelname};
+}
+
 =head2 dump_system_information
 
 This function dumps all known system information on stdout.
@@ -116,12 +127,14 @@ Will return 1 if the operating system is $string.
 
 sub operating_system_is {
 
-  my ($os) = @_;
+  my (@oses) = @_;
 
   my $operatingsystem = Rex::Hardware::Host->get_operating_system();
 
-  if ( $operatingsystem eq $os ) {
-    return 1;
+  for my $os (@oses) {
+    if ( $operatingsystem eq $os ) {
+      return 1;
+    }
   }
 
   return 0;
@@ -253,7 +266,8 @@ sub is_redhat {
     "RedHatEnterpriseServer",      "RedHatEnterpriseES",
     "RedHatEnterpriseWorkstation", "RedHatEnterpriseWS",
     "Amazon",                      "ROSAEnterpriseServer",
-    "CloudLinuxServer",
+    "CloudLinuxServer",            "XenServer",
+    "OracleServer",                "Virtuozzo",
   );
 
   if ( grep { /$os/i } @redhat_clones ) {
@@ -334,7 +348,7 @@ sub is_mageia {
 sub is_debian {
   my $os = @_ ? shift : get_operating_system();
 
-  my @debian_clones = ( "Debian", "Ubuntu" );
+  my @debian_clones = ( "Debian", "Ubuntu", "LinuxMint", "Raspbian", "Devuan" );
 
   if ( grep { /$os/i } @debian_clones ) {
     return 1;
@@ -520,6 +534,40 @@ Returns true if the target system is a Gentoo System.
 sub is_gentoo {
   my $os = get_operating_system();
   if ( $os =~ m/Gentoo/i ) {
+    return 1;
+  }
+
+}
+
+=head2 is_arch
+
+ task "foo", "server1", sub {
+   if(is_arch) {
+     # do something on a arch system
+   }
+ };
+
+=cut
+
+sub is_arch {
+  my $os = @_ ? shift : get_operating_system();
+
+  my @arch_clones = ( "Arch", "Manjaro", "Antergos" );
+
+  if ( grep { /$os/i } @arch_clones ) {
+    return 1;
+  }
+}
+
+=head2 is_void
+
+Returns true if the target system is a Void Linux system.
+
+=cut
+
+sub is_void {
+  my $os = get_operating_system();
+  if ( $os =~ m/VoidLinux/i ) {
     return 1;
   }
 

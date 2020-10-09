@@ -8,44 +8,39 @@
 
 =head1 NAME
 
-Rex - Remote Execution
+Rex - the friendly automation framework
 
 =head1 DESCRIPTION
 
-(R)?ex is a small script to ease the execution of remote commands. You can write small tasks in a file named I<Rexfile>.
+Rex is an automation framework that is friendly to any combinations of local
+and remote execution, push and pull style of management, or imperative and
+declarative approach.
 
-You can find examples and howtos on L<http://rexify.org/>
+Its flexibility makes it a great fit for many different use cases, but most
+commonly Rex is used to automate application deployment and data center
+infrastructure management tasks.
 
-=head1 GETTING HELP
+See L<Rex::Commands> for a starting point of available built-in commands.
 
-=over 4
-
-=item * Web Site: L<http://rexify.org/>
-
-=item * IRC: irc.freenode.net #rex
-
-=item * Bug Tracker: L<https://github.com/RexOps/Rex/issues>
-
-=item * Twitter: L<http://twitter.com/jfried83>
-
-=back
+See L<rex|https://metacpan.org/pod/distribution/Rex/bin/rex> for more information about how to use rex on the command line.
 
 =head1 SYNOPSIS
 
- use strict;
- use warnings;
+    # In a Rexfile:
+    use Rex -feature => [qw/1.4/];
+   
+    user "root";
+    password "ch4ngem3";
+   
+    desc "Show system information";
+    task "sysinfo", sub {
+       say run "uname -a";
+    };
 
- user "root";
- password "ch4ngem3";
-
- desc "Show Unix version";
- task "uname", sub {
-    say run "uname -a";
- };
-
- bash# rex -H "server[01..10]" uname
-
-See L<Rex::Commands> for a list of all commands you can use.
+    1;
+   
+    # On the command line:
+    $ rex -H server[01..10] sysinfo
 
 =head1 CLASS METHODS
 
@@ -60,7 +55,7 @@ use warnings;
 
 # development version if this variable is not set
 if ( !$Rex::VERSION ) {
-  $Rex::VERSION = "9999.99.99";
+  $Rex::VERSION = "9999.99.99_99";
 }
 
 BEGIN {
@@ -75,17 +70,97 @@ BEGIN {
   use Rex::Notify;
   use Rex::Require;
   use File::Basename;
+  use File::Spec;
   eval { Net::SSH2->require; };
 }
 
 our ( @EXPORT, @CONNECTION_STACK, $GLOBAL_SUDO, $MODULE_PATHS,
-  $WITH_EXIT_STATUS );
+  $WITH_EXIT_STATUS, @FEATURE_FLAGS );
 
 $WITH_EXIT_STATUS = 1; # since 0.50 activated by default
-
-my $cur_dir;
+@FEATURE_FLAGS    = ();
 
 BEGIN {
+
+  sub generate_inc {
+    my @additional = @_;
+
+    my @rex_inc = ();
+
+# this must be the first, special handling for rex modules which uses Module.pm and not
+# __module__.pm as their initial file. (rex pre 0.40 or something)
+    push @rex_inc, sub {
+      my $mod_to_load = $_[1];
+      return search_module_path( $mod_to_load, 1 );
+    };
+
+# this adds the current directory to the lib search path.
+# this must come before all other paths, because custom libraries can be project dependant
+# see: #1108
+    push @rex_inc, add_cwd_to_inc();
+    push @rex_inc, add_libstruct_to_inc($_) for @additional;
+
+    # we have to add the Rexfile's path to @INC FIX: #1170
+    push @rex_inc, @additional;
+
+# add home directory/.rex/recipes to the search path, so that recipes can be managed
+# at a central location.
+    my $home_dir = _home_dir();
+    if ( -d "$home_dir/.rex/recipes" ) {
+      push( @INC, "$home_dir/.rex/recipes" );
+    }
+
+    # add the default search locations
+    push @rex_inc, @INC;
+
+    # this must be the last entry, special handling to load rex modules.
+    push(
+      @rex_inc,
+      sub {
+        my $mod_to_load = $_[1];
+        return search_module_path( $mod_to_load, 0 );
+      }
+    );
+
+    return @rex_inc;
+  }
+
+  sub add_libstruct_to_inc {
+    my ($path) = @_;
+    my @ret = ();
+
+    if ( -d File::Spec->catdir( $path, "lib" ) ) {
+      push( @ret, File::Spec->catdir( $path, "lib" ) );
+      push( @ret, File::Spec->catdir( $path, "lib", "perl", "lib", "perl5" ) );
+      if ( $^O eq "linux" ) {
+        push(
+          @ret,
+          File::Spec->catdir(
+            $path, "lib", "perl", "lib", "perl5", "x86_64-linux"
+          )
+        );
+      }
+      if ( $^O =~ m/^MSWin/ ) {
+        my ($special_win_path) = grep { m/\/MSWin32\-/ } @INC;
+        if ( defined $special_win_path ) {
+          my $mswin32_path = basename $special_win_path;
+          push(
+            @ret,
+            File::Spec->catdir(
+              $path, "lib", "perl", "lib", "perl5", $mswin32_path
+            )
+          );
+        }
+      }
+    }
+
+    return @ret;
+  }
+
+  sub add_cwd_to_inc {
+    my $path = getcwd;
+    return add_libstruct_to_inc($path);
+  }
 
   sub _home_dir {
     if ( $^O =~ m/^MSWin/ ) {
@@ -95,40 +170,8 @@ BEGIN {
     return $ENV{'HOME'} || "";
   }
 
-  $cur_dir = getcwd;
-
-  unshift(
-    @INC,
-    sub {
-      my $mod_to_load = $_[1];
-      return search_module_path( $mod_to_load, 1 );
-    }
-  );
-
-  if ( -d "$cur_dir/lib" ) {
-    push( @INC, "$cur_dir/lib" );
-    push( @INC, "$cur_dir/lib/perl/lib/perl5" );
-    if ( $^O =~ m/^MSWin/ ) {
-      my ($special_win_path) = grep { m/\/MSWin32\-/ } @INC;
-      if ( defined $special_win_path ) {
-        my $mswin32_path = basename $special_win_path;
-        push( @INC, "$cur_dir/lib/perl/lib/perl5/$mswin32_path" );
-      }
-    }
-  }
-
-  my $home_dir = _home_dir();
-  if ( -d "$home_dir/.rex/recipes" ) {
-    push( @INC, "$home_dir/.rex/recipes" );
-  }
-
-  push(
-    @INC,
-    sub {
-      my $mod_to_load = $_[1];
-      return search_module_path( $mod_to_load, 0 );
-    }
-  );
+  my @new_inc = generate_inc();
+  @INC = @new_inc;
 
 }
 
@@ -157,10 +200,19 @@ sub search_module_path {
   }
 
   for my $file (@search_in) {
-    if ( -f $file ) {
+    my $o = -f $file;
+    my $fh_t;
+    if ( $^O =~ m/^MSWin/i && !$o ) {
+
+      # this is a windows workaround for if(-f ) on symlinks
+      $o = open( my $fh_t, "<", $file );
+    }
+
+    if ($o) {
+      close $fh_t if $fh_t;
       my ($path) = ( $file =~ m/^(.*)\/.+?$/ );
       if ( $path !~ m/\// ) {
-        $path = $cur_dir . "/$path";
+        $path = getcwd() . "/$path";
       }
 
       # module found, register path
@@ -311,13 +363,19 @@ Returns 1 if the current operation is executed within sudo.
 =cut
 
 sub is_sudo {
-  if ($GLOBAL_SUDO) { return 1; }
 
   if ( exists $CONNECTION_STACK[-1]->{server}->{auth}->{sudo}
     && $CONNECTION_STACK[-1]->{server}->{auth}->{sudo} == 1 )
   {
     return 1;
   }
+  elsif ( exists $CONNECTION_STACK[-1]->{server}->{auth}->{sudo}
+    && $CONNECTION_STACK[-1]->{server}->{auth}->{sudo} == 0 )
+  {
+    return 0;
+  }
+
+  if ($GLOBAL_SUDO) { return 1; }
 
   if ( $CONNECTION_STACK[-1] ) {
     return $CONNECTION_STACK[-1]->{conn}->get_current_use_sudo;
@@ -385,7 +443,7 @@ sub connect {
   my ($param) = {@_};
 
   my $server      = $param->{server};
-  my $port        = $param->{port} || 22;
+  my $port        = $param->{port}    || 22;
   my $timeout     = $param->{timeout} || 5;
   my $user        = $param->{"user"};
   my $pass        = $param->{"password"};
@@ -462,8 +520,43 @@ sub deprecated {
 
 }
 
+sub has_feature_version {
+  my ($version) = @_;
+
+  my @version_flags = grep { m/^\d+\./ } @FEATURE_FLAGS;
+  for my $v (@version_flags) {
+    if ( $version <= $v ) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
+sub has_feature_version_lower {
+  my ($version) = @_;
+
+  my @version_flags = grep { m/^\d+\./ } @FEATURE_FLAGS;
+  for my $v (@version_flags) {
+    if ( $version > $v ) {
+      return 1;
+    }
+  }
+
+  return 0;
+}
+
 sub import {
   my ( $class, $what, $addition1 ) = @_;
+
+  srand();
+
+  if ( $addition1 && ref $addition1 eq "ARRAY" ) {
+    push @FEATURE_FLAGS, $what, @{$addition1};
+  }
+  elsif ($addition1) {
+    push @FEATURE_FLAGS, $what, $addition1;
+  }
 
   $what ||= "";
 
@@ -471,6 +564,14 @@ sub import {
 
   # use Net::OpenSSH if present (default without feature flag)
   Rex::Config->set_use_net_openssh_if_present(1);
+
+  if ( $what eq "-minimal" ) {
+    require Rex::Commands;
+    Rex::Commands->import( register_in => $register_to );
+
+    require Rex::Helper::Rexfile::ParamLookup;
+    Rex::Helper::Rexfile::ParamLookup->import( register_in => $register_to );
+  }
 
   if ( $what eq "-base" || $what eq "base" || $what eq "-feature" ) {
     require Rex::Commands;
@@ -527,6 +628,11 @@ sub import {
     require Rex::Commands::User;
     Rex::Commands::User->import( register_in => $register_to );
 
+    require Rex::Helper::Rexfile::ParamLookup;
+    Rex::Helper::Rexfile::ParamLookup->import( register_in => $register_to );
+
+    require Rex::Resource::firewall;
+    Rex::Resource::firewall->import( register_in => $register_to );
   }
 
   if ( $what eq "-feature" || $what eq "feature" ) {
@@ -540,21 +646,32 @@ sub import {
 
       if ( $add =~ m/^(\d+\.\d+)$/ ) {
         my $vers = $1;
-        my $_ver = $Rex::VERSION;
-        $_ver =~ s/_\d+$//; # remove rc info
+        my ( $major, $minor, $patch, $dev_release ) =
+          $Rex::VERSION =~ m/^(\d+)\.(\d+)\.(\d+)[_.]?(\d+)?$/;
 
-        my ( $major, $minor, $patch ) = split( /\./, $_ver );
         my ( $c_major, $c_minor ) = split( /\./, $vers );
 
-        if ( ( $c_major > $major )
+        if ( defined $dev_release && $c_major == $major && $c_minor > $minor ) {
+          Rex::Logger::info(
+            "This is development release $Rex::VERSION of Rex. Enabling experimental feature flag for $vers.",
+            "warn"
+          );
+        }
+        elsif ( ( $c_major > $major )
           || ( $c_major >= $major && $c_minor > $minor ) )
         {
           Rex::Logger::info(
             "This Rexfile tries to enable features that are not supported with your version. Please update.",
-            "warn"
+            "error"
           );
           exit 1;
         }
+      }
+
+      if ( $add =~ m/^\d+\.\d+$/ && $add >= 1.4 ) {
+        Rex::Logger::debug("Enabling task_chaining_cmdline_args feature");
+        Rex::Config->set_task_chaining_cmdline_args(1);
+        $found_feature = 1;
       }
 
       if ( $add =~ m/^\d+\.\d+$/ && $add >= 1.3 ) {
@@ -640,7 +757,7 @@ sub import {
       # remove default task auth
       if ( $add =~ m/^\d+\.\d+$/ && $add >= 0.31 ) {
         Rex::Logger::debug("activating featureset >= 0.31");
-        Rex::TaskList->create()->set_default_auth(0);
+        Rex::Config->set_default_auth(0);
         $found_feature = 1;
       }
 
@@ -786,6 +903,30 @@ sub import {
         $found_feature = 1;
       }
 
+      if ( $add eq "no_task_chaining_cmdline_args" ) {
+        Rex::Logger::debug("Disabling task_chaining_cmdline_args feature");
+        Rex::Config->set_task_chaining_cmdline_args(0);
+        $found_feature = 1;
+      }
+
+      if ( $add eq "task_chaining_cmdline_args" ) {
+        Rex::Logger::debug("Enabling task_chaining_cmdline_args feature");
+        Rex::Config->set_task_chaining_cmdline_args(1);
+        $found_feature = 1;
+      }
+
+      if ( $add eq "write_utf8_files" ) {
+        Rex::Logger::debug("Enabling write_utf8_files feature");
+        Rex::Config->set_write_utf8_files(1);
+        $found_feature = 1;
+      }
+
+      if ( $add eq "no_write_utf8_files" ) {
+        Rex::Logger::debug("Disabling write_utf8_files feature");
+        Rex::Config->set_write_utf8_files(0);
+        $found_feature = 1;
+      }
+
       if ( $found_feature == 0 ) {
         Rex::Logger::info(
           "You tried to load a feature ($add) that doesn't exists in your Rex version. Please update.",
@@ -811,9 +952,212 @@ sub import {
   strict->import;
 }
 
+=head1 FEATURE FLAGS
+
+Everyone knows the pain if something gets deprecated and one has to
+port his old (and stable) code to a new version of a library or a
+framework. There is enough work to do instead of fixing code to work
+with newer versions of them.
+
+So there is one promise new versions of Rex has to fulfill. They must
+be backward compatible.
+
+I know this might be impossible in one way or another, but to minimize
+this danger there is a thing called feature flags. If there is the need
+to break backward compatibility in favor of a new feature there will be
+a feature flag for this change. And only if this feature flag gets
+enabled in the Rexfile it will break compatibility.
+
+So the default is always to remain compatible.
+
+If you have a problem that occurs after an update, it is considered as
+a bug. Please report this bug in our issue tracker.
+
+Also see the L<backwards compatibility|https://metacpan.org/release/Rex/source/CONTRIBUTING.md#backwardscompatibility>
+section of the CONTRIBUTING guide.
+
+=head2 How to enable feature flags
+
+You can enable feature flags in your Rexfile with the following code:
+
+    use Rex -feature => ['1.4'];
+
+or even multiple ones like this:
+
+    use Rex -feature => [qw(1.4 exec_autodie)];
+
+=head2 List of feature flags
+
+=over 4
+
+=item 1.4
+
+Enable per-task argument parsing (L<task_chaining_cmdline_args|#task_chaining_cmdline_args>). Furthermore, all features from earlier versions are activated. Available since version 1.4.
+
+=item no_task_chaining_cmdline_args
+
+Disable per-task argument parsing. Available since version 1.4.
+
+=item task_chaining_cmdline_args
+
+Enable per-task argument parsing: C<rex --rex --args task1 --task1arg=value task2 --task2arg>
+so task1 only gets C<task1arg> and task2 only gets C<task2arg>. Available since version 1.4.
+
+=item 1.3
+
+Activating the new template engine by default. Furthermore, all features from earlier versions are activated. Available since version 1.3.
+
+=item no_template_ng
+
+Disabling the new template engine. Available since version 1.3.
+
+=item 1.0
+
+Disabling usage of a tty. This increases compatibility for remote
+execution. Furthermore, all features from earlier versions are
+activated. Available since version 1.0.
+
+=item no_autodie
+
+Will disable autodie feature. Available since version 1.0.
+
+=item tty
+
+Enable pty usage for ssh connections. Available since version 1.0.
+
+=item template_ng
+
+Enabling the new template engine (better error reporting, etc.). Available since version 0.56.
+
+=item 0.56
+
+Will activate autodie feature. Furthermore, all features from earlier
+versions are activated. Available since version 0.56.
+
+=item autodie
+
+Will enable autodie feature: die on all failed L<filesytem commands|https://metacpan.org/pod/Rex::Commands::Fs>. Available since version 0.56.
+
+=item 0.55
+
+Will activate using L<Net::OpenSSH> by default if present. Furthermore,
+all features from earlier versions are activated. Available since version 0.55.
+
+=item 0.54
+
+Will activate checking services for existence before trying to
+manipulate them, and C<set()> will overwrite already existing values
+(instead of concatenating). Furthermore, all features from earlier
+versions are activated. Available since version 0.54.
+
+=item 0.53
+
+Will activate register_cmdb_top_scope. And all things 0.51 and down
+activated. Available since version 0.53.
+
+=item register_cmdb_top_scope
+
+Will register all cmdb top scope variables automatically in the
+templates. Available since version 0.53.
+
+=item 0.51
+
+Will load L<Rex::Constants> and the CMDB by default. And all things 0.47
+and down activated. Available since version 0.51.
+
+=item disable_taskname_warning
+
+Disable warning about invalid task names (they should match
+C</^[a-zA-Z_][a-zA-Z0-9_]*$/>). Available since version 0.47.
+
+=item verbose_run
+
+Explicitly output "Successfully executed" or "Error executing" messages
+for C<run()> commands. Available since version 0.47.
+
+=item no_cache
+
+Disable caching (like discovery results of remote OS, hardware, shell,
+etc.). Available since version 0.46.
+
+=item no_path_cleanup
+
+Rex cleans the path before executing a command. With this feature Rex
+doesn't cleanup the path. Available since version 0.44.
+
+=item source_profile
+
+Source C<$HOME/.profile> before running a command. Available since version 0.44.
+
+=item source_global_profile
+
+Source C</etc/profile> before running a command. Available since version 0.44.
+
+=item exec_autodie
+
+If you execute a command with C<run()> Rex will C<die()> if the command
+returns a C<RETVAL != 0>. Available since version 0.44.
+
+=item exec_and_sleep
+
+Sometimes some commands that fork away didn't keep running. With this
+flag rex will wait a few ms before exiting the shell. Available since version 0.43.
+
+=item disable_strict_host_key_checking
+
+Disabling strict host key checking for openssh connection mode. Available since version 0.43.
+
+=item reporting
+
+Enable reporting. Available since version 0.43.
+
+=item empty_groups
+
+Enable usage of empty groups. Available since version 0.42.
+
+=item use_server_auth
+
+Enable the usage of special authentication options for servers. Available since version 0.42.
+
+=item no_tty
+
+Disable pty usage for ssh connections. Available since version 0.41.
+
+=item no_local_template_vars
+
+Use global variables in templates. Available since version 0.40.
+
+=item sudo_without_sh
+
+Run sudo commands directly without the use of 'sh'. This might break
+things. Available since version 0.40.
+
+=item sudo_without_locales
+
+Run sudo commands without locales. This will break things if you don't
+use English locales. Available since version 0.40.
+
+=item exit_status
+
+This option tells Rex to return a non zero value on exit if a task
+fails. Available since version 0.39.
+
+=item 0.35
+
+This option enables the features of 0.31 and the possibility to call
+tasks as a functions without the need to use a hash reference for the
+parameters. Available since version 0.35.
+
+=item 0.31
+
+To enable special authentication options for a server group. This will
+overwrite the default authentication options for a task. Available since version 0.31.
+
+=back
+
 =head1 CONTRIBUTORS
 
-Many thanks to the contributors for their work. Please see L<CONTRIBUTORS|https://github.com/RexOps/Rex/blob/master/CONTRIBUTORS> file for a complete list.
+Many thanks to the contributors for their work. Please see L<CONTRIBUTORS|https://metacpan.org/release/Rex/source/CONTRIBUTORS> file for a complete list.
 
 =head1 LICENSE
 

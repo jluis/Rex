@@ -1,9 +1,9 @@
-use Test::More tests => 30;
+use Test::More tests => 31;
 
 use Rex::Inventory::DMIDecode;
 
 my @lines = eval { local (@ARGV) = ("t/dmi.linux.out"); <>; };
-my $dmi = Rex::Inventory::DMIDecode->new( lines => \@lines );
+my $dmi   = Rex::Inventory::DMIDecode->new( lines => \@lines );
 
 isa_ok( $dmi, "Rex::Inventory::DMIDecode", "dmi object" );
 
@@ -13,6 +13,16 @@ my @cpus    = $dmi->get_cpus;
 my @mems    = $dmi->get_memory_modules;
 my @mema    = $dmi->get_memory_arrays;
 my $sysinfo = $dmi->get_system_information;
+
+is_deeply(
+  $bb->get_all,
+  {
+    manufacturer  => "Parallels Software International Inc.",
+    product_name  => "Parallels Virtual Platform",
+    serial_number => "None",
+    version       => "None",
+  }
+);
 
 is(
   $bb->get_product_name,
@@ -64,7 +74,7 @@ $bios    = undef;
 $sysinfo = undef;
 
 @lines = eval { local (@ARGV) = ("t/dmi.obsd.out"); <>; };
-$dmi = Rex::Inventory::DMIDecode->new( lines => \@lines );
+$dmi   = Rex::Inventory::DMIDecode->new( lines => \@lines );
 
 isa_ok( $dmi, "Rex::Inventory::DMIDecode", "dmi object (obsd)" );
 
@@ -125,7 +135,7 @@ $bios    = undef;
 $sysinfo = undef;
 
 @lines = eval { local (@ARGV) = ("t/dmi.fbsd.out"); <>; };
-$dmi = Rex::Inventory::DMIDecode->new( lines => \@lines );
+$dmi   = Rex::Inventory::DMIDecode->new( lines => \@lines );
 
 isa_ok( $dmi, "Rex::Inventory::DMIDecode", "dmi object (fbsd)" );
 

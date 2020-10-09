@@ -13,6 +13,7 @@ use warnings;
 
 use Rex::Interface::Fs::Base;
 use base qw(Rex::Interface::Fs::Base);
+use Rex::Helper::File::Stat;
 
 sub new {
   my $that  = shift;
@@ -94,7 +95,14 @@ sub is_file {
 
 sub unlink {
   my ( $self, @files ) = @_;
-  CORE::unlink(@files);
+  for my $file (@files) {
+    if ( CORE::unlink($file) == 0 ) {
+      die "Error unlinking file: $file" if ( Rex::Config->get_autodie );
+      return 0;
+    }
+  }
+
+  return 1;
 }
 
 sub mkdir {
@@ -121,7 +129,7 @@ sub stat {
 
     my %ret;
 
-    $ret{'mode'}  = sprintf( "%04o", $mode & 07777 );
+    $ret{'mode'}  = sprintf( "%04o", Rex::Helper::File::Stat->S_IMODE($mode) );
     $ret{'size'}  = $size;
     $ret{'uid'}   = $uid;
     $ret{'gid'}   = $gid;

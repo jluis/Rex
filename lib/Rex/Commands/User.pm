@@ -26,6 +26,7 @@ With this module you can manage user and groups.
      password    => 'blahblah',
      system      => 1,
      create_home => TRUE,
+     shell       => '/bin/bash',
      ssh_key     => "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQChUw...";
  };
 
@@ -41,7 +42,6 @@ use warnings;
 # VERSION
 
 require Rex::Exporter;
-use Rex::Commands::Run;
 use Rex::Commands::Fs;
 use Rex::Commands::File;
 use Rex::Logger;
@@ -67,10 +67,12 @@ Manage user account.
    comment        => 'User Account',
    expire         => '2011-05-30',
    groups         => [ 'root', '...' ],
+   login_class    => 'staff',   # on OpenBSD
    password       => 'blahblah',
    crypt_password => '*', # on Linux, OpenBSD and NetBSD
    system         => 1,
    create_home    => TRUE,
+   shell          => '/bin/bash',
    ssh_key        => "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQChUw...";
 
 There is also a no_create_home option similar to create_home but doing the
@@ -123,6 +125,20 @@ sub account {
 =head2 create_user($user => {})
 
 Create or update a user.
+
+This function supports the following L<hooks|Rex::Hook>:
+
+=over 4
+
+=item before
+
+This gets executed before the user is created. All original parameters are passed to it.
+
+=item after
+
+This gets executed after the user is created. All original parameters, and the user's C<UID> are passed to it.
+
+=back
 
 =cut
 
@@ -272,7 +288,7 @@ sub delete_user {
 =head2 lock_password($user)
 
 Lock the password of a user account. Currently this is only
-available on Linux (see passwd --lock).
+available on Linux (see passwd --lock) and OpenBSD.
 
 =cut
 
@@ -283,7 +299,7 @@ sub lock_password {
 =head2 unlock_password($user)
 
 Unlock the password of a user account. Currently this is only
-available on Linux (see passwd --unlock).
+available on Linux (see passwd --unlock) and OpenBSD.
 
 =cut
 
@@ -309,11 +325,17 @@ sub group_resource {
     Rex::get_current_connection()->{reporter}
       ->report_resource_start( type => "group", name => $group_name );
 
+    my $gid = get_gid($group_name);
+
     if ( $option{ensure} eq "present" ) {
-      Rex::Commands::User::create_group( $group_name, %option );
+      if ( !defined $gid ) {
+        Rex::Commands::User::create_group( $group_name, %option );
+      }
     }
     elsif ( $option{ensure} eq "absent" ) {
-      Rex::Commands::User::delete_group($group_name);
+      if ( defined $gid ) {
+        Rex::Commands::User::delete_group($group_name);
+      }
     }
     else {
       die "Unknown 'ensure' value. Valid values are 'present' and 'absent'.";

@@ -15,7 +15,7 @@ require Rex::Commands;
 use Rex::Interface::Fs::Base;
 use Rex::Helper::Path;
 use Rex::Helper::Encode;
-use JSON::XS;
+use JSON::MaybeXS;
 use base qw(Rex::Interface::Fs::Base);
 use Data::Dumper;
 
@@ -34,7 +34,12 @@ sub ls {
 
   my @ret;
 
-  my @out = split( /\n/, $self->_exec("ls -a1 $path") );
+  my @out = split(
+    /\n/,
+    $self->_exec(
+      "ls -a1 $path", undef, { env => { QUOTING_STYLE => "literal" } }
+    )
+  );
 
   # failed open directory, return undef
   if ( $? != 0 ) { return; }
@@ -279,9 +284,9 @@ sub _write_to_rnd_file {
 }
 
 sub _exec {
-  my ( $self, $cmd ) = @_;
+  my ( $self, $cmd, $path, $option ) = @_;
   my $exec = Rex::Interface::Exec->create("Sudo");
-  return $exec->exec($cmd);
+  return $exec->exec( $cmd, $path, $option );
 }
 
 1;

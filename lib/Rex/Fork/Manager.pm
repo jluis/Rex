@@ -12,6 +12,7 @@ use warnings;
 # VERSION
 
 use Rex::Fork::Task;
+use Time::HiRes qw(sleep);
 
 sub new {
   my $that  = shift;
@@ -27,18 +28,17 @@ sub new {
 }
 
 sub add {
-  my ( $self, $task, $start ) = @_;
-  my $f = Rex::Fork::Task->new( task => $task );
+  my ( $self, $coderef ) = @_;
+
+  my $f = Rex::Fork::Task->new( coderef => $coderef );
 
   push( @{ $self->{'forks'} }, $f );
 
-  if ($start) {
-    $f->start;
-    ++$self->{'running'};
+  $f->start;
+  ++$self->{'running'};
 
-    if ( $self->{'running'} >= $self->{'max'} ) {
-      $self->wait_for_one;
-    }
+  if ( $self->{'running'} >= $self->{'max'} ) {
+    $self->wait_for_one;
   }
 }
 
@@ -86,7 +86,7 @@ sub wait_for {
 
         return 1 unless $all;
       }
-      select undef, undef, undef, .1;
+      sleep Rex::Config->get_waitpid_blocking_sleep_time;
     }
   } until $self->{'running'} == 0;
 }

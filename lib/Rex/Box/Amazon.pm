@@ -82,7 +82,6 @@ use warnings;
 use Data::Dumper;
 use Rex::Box::Base;
 use Rex::Commands -no => [qw/auth/];
-use Rex::Commands::Run;
 use Rex::Commands::Fs;
 use Rex::Commands::Cloud;
 
@@ -154,8 +153,9 @@ sub import_vm {
       name           => $self->{name},
       key            => $self->{options}->{auth_key},
       zone           => $self->{options}->{zone},
-      type           => $self->{type} || "m1.large",
+      type           => $self->{type}           || "m1.large",
       security_group => $self->{security_group} || "default",
+      options        => $self->options,
     };
   }
 
@@ -200,21 +200,6 @@ sub security_group {
   $self->{security_group} = $sec_group;
 }
 
-sub provision_vm {
-  my ( $self, @tasks ) = @_;
-
-  if ( !@tasks ) {
-    @tasks = @{ $self->{__tasks} };
-  }
-
-  $self->wait_for_ssh();
-
-  for my $task (@tasks) {
-    Rex::TaskList->create()->get_task($task)->set_auth( %{ $self->{__auth} } );
-    Rex::TaskList->create()->get_task($task)->run( $self->ip );
-  }
-}
-
 =head2 forward_port(%option)
 
 Not available for Amazon Boxes.
@@ -235,7 +220,6 @@ sub list_boxes {
   my ($self) = @_;
 
   my @vms = cloud_instance_list;
-
   my @ret = grep {
          $_->{name}
       && $_->{state} ne "terminated"
@@ -276,6 +260,16 @@ sub stop {
   $self->info;
 
   cloud_instance stop => $self->{info}->{id};
+}
+
+sub destroy {
+  my ($self) = @_;
+
+  Rex::Logger::info( "Destroying instance: " . $self->{name} );
+
+  $self->info;
+
+  cloud_instance terminate => $self->{info}->{id};
 }
 
 =head2 info

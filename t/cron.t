@@ -13,7 +13,7 @@ my @cron = $c->list;
 
 is( $cron[0]->{type}, "comment", "first line is a comment" );
 
-is( $cron[1]->{type}, "comment", "second line is comment" );
+is( $cron[1]->{type}, "comment",                   "second line is comment" );
 is( $cron[1]->{line}, "# Shell variable for cron", "got the line content #2" );
 
 is( $cron[2]->{type},  "env",       "3rd line is a env variable" );
@@ -448,7 +448,7 @@ unless ( $^O =~ m/^MSWin/ ) {
   is( $cron[0]->{hour},         "9-20", "the first job / hour" );
   is( $cron[0]->{day_of_month}, "*",    "the first job / day" );
   is( $cron[0]->{month},        "*",    "the first job / month" );
-  is( $cron[0]->{day_of_week}, "*", "the first job / day_of_month of week" );
+  is( $cron[0]->{day_of_week},  "*", "the first job / day_of_month of week" );
   is(
     $cron[0]->{command},
     "/home/username/script/script1.sh > /dev/null",

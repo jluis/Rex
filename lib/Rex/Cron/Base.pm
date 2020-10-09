@@ -15,7 +15,6 @@ use Rex::Logger;
 use Rex::Commands;
 use Rex::Commands::File;
 use Rex::Commands::Fs;
-use Rex::Commands::Run;
 use Rex::Helper::Run;
 use Data::Dumper;
 use Rex::Helper::Path;
@@ -45,8 +44,8 @@ sub list_jobs {
 
 sub list_envs {
   my ($self) = @_;
-  my @jobs = @{ $self->{cron} };
-  my @ret = grep { $_->{type} eq "env" } @jobs;
+  my @jobs   = @{ $self->{cron} };
+  my @ret    = grep { $_->{type} eq "env" } @jobs;
 }
 
 sub add {
@@ -80,15 +79,36 @@ sub add {
 
 sub add_env {
   my ( $self, $name, $value ) = @_;
-  unshift(
-    @{ $self->{cron} },
-    {
-      type  => "env",
-      line  => "$name=\"$value\"",
-      name  => $name,
-      value => $value,
+
+  my $env_index = 0;
+  my $exists    = 0;
+  for my $env ( $self->list_envs ) {
+    if ( $env->{name} eq "$name" ) {
+      if ( $env->{value} ne "\"$value\"" ) {
+        Rex::Logger::debug("Environment variable changed : $name");
+        $self->delete_env($env_index);
+      }
+      else {
+        Rex::Logger::debug(
+          "Environment variable already exists with same value: $name=$value");
+        $exists = 1;
+      }
     }
-  );
+
+    $env_index++;
+  }
+
+  if ( $exists == 0 ) {
+    unshift(
+      @{ $self->{cron} },
+      {
+        type  => "env",
+        line  => "$name=\"$value\"",
+        name  => $name,
+        value => $value,
+      }
+    );
+  }
 }
 
 sub delete_job {
@@ -159,17 +179,24 @@ sub write_cron {
 
 sub activate_user_cron {
   my ( $self, $file, $user ) = @_;
+  $user = undef if $user eq &_whoami;
+
   my $command = 'crontab';
   $command .= " -u $user" if defined $user;
+
   i_run "$command $file";
   unlink $file;
 }
 
 sub read_user_cron {
   my ( $self, $user ) = @_;
+  $user = undef if $user eq &_whoami;
+
   my $command = 'crontab -l';
   $command .= " -u $user" if defined $user;
-  my @lines = i_run $command;
+  $command .= ' 2> /dev/null';
+
+  my @lines = i_run $command, fail_ok => 1;
   $self->parse_cron(@lines);
 }
 
@@ -226,8 +253,8 @@ sub parse_cron {
 
     elsif ( $line =~ m/=/ ) {
       my ( $name, $value ) = split( /=/, $line, 2 );
-      $name =~ s/^\s+//;
-      $name =~ s/\s+$//;
+      $name  =~ s/^\s+//;
+      $name  =~ s/\s+$//;
       $value =~ s/^\s+//;
       $value =~ s/\s+$//;
 
@@ -264,6 +291,10 @@ sub _create_defaults {
   $config{"command"} ||= "false";
 
   return %config;
+}
+
+sub _whoami {
+  return i_run q(perl -e 'print scalar getpwuid($<)');
 }
 
 1;

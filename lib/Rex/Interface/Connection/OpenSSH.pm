@@ -17,6 +17,7 @@ BEGIN {
 }
 
 use Rex::Interface::Connection::Base;
+use Rex::Helper::IP;
 use Data::Dumper;
 use base qw(Rex::Interface::Connection::Base);
 
@@ -38,8 +39,6 @@ sub connect {
     $port, $timeout, $auth_type,   $is_sudo
   );
 
-  Rex::Logger::debug("Using Net::OpenSSH for connection");
-
   $user        = $option{user};
   $pass        = $option{password};
   $server      = $option{server};
@@ -50,29 +49,26 @@ sub connect {
   $auth_type   = $option{auth_type};
   $is_sudo     = $option{sudo};
 
-  $self->{is_sudo} = $is_sudo;
-
+  $self->{server}        = $server;
+  $self->{is_sudo}       = $is_sudo;
   $self->{__auth_info__} = \%option;
 
+  Rex::Logger::debug("Using Net::OpenSSH for connection");
   Rex::Logger::debug( "Using user: " . $user );
-  Rex::Logger::debug(
-    Rex::Logger::masq( "Using password: %s", ( $pass || "" ) ) );
-
-  $self->{server} = $server;
+  Rex::Logger::debug( Rex::Logger::masq( "Using password: %s", $pass ) )
+    if defined $pass;
 
   my $proxy_command = Rex::Config->get_proxy_command( server => $server );
 
-  $port ||= Rex::Config->get_port( server => $server ) || 22;
+  $port    ||= Rex::Config->get_port( server => $server )    || 22;
   $timeout ||= Rex::Config->get_timeout( server => $server ) || 3;
 
   $server =
     Rex::Config->get_ssh_config_hostname( server => $server ) || $server;
 
-  if ( $server =~ m/^(.*?):(\d+)$/ ) {
-    $server = $1;
-    $port   = $2;
-  }
-  Rex::Logger::info( "Connecting to $server:$port (" . $user . ")" );
+  ( $server, $port ) = Rex::Helper::IP::get_server_and_port( $server, $port );
+
+  Rex::Logger::debug( "Connecting to $server:$port (" . $user . ")" );
 
   my %ssh_opts = Rex::Config->get_openssh_opt();
   Rex::Logger::debug("get_openssh_opt()");
@@ -98,9 +94,16 @@ sub connect {
 
   my @connection_props = ( "" . $server ); # stringify server object, so that a dumper don't print out passwords.
   push @connection_props, ( user => $user, port => $port );
-  push @connection_props, master_opts      => \@ssh_opts_line if @ssh_opts_line;
-  push @connection_props, default_ssh_opts => \@ssh_opts_line if @ssh_opts_line;
-  push @connection_props, proxy_command    => $proxy_command  if $proxy_command;
+
+  if (@ssh_opts_line) {
+    if ( !$net_openssh_constructor_options{external_master} ) {
+      push @connection_props, master_opts => \@ssh_opts_line;
+    }
+
+    push @connection_props, default_ssh_opts => \@ssh_opts_line;
+  }
+
+  push @connection_props, proxy_command => $proxy_command if $proxy_command;
 
   my @auth_types_to_try;
   if ( $auth_type && $auth_type eq "pass" ) {
@@ -170,19 +173,20 @@ CONNECT_TRY:
 
   if ( $self->{ssh} && $self->{ssh}->error ) {
     Rex::Logger::info(
-      "Can't connect to $server (" . $self->{ssh}->error() . ")", "warn" );
+      "Can't authenticate against $server (" . $self->{ssh}->error() . ")",
+      "warn" );
     $self->{connected} = 1;
 
     return;
   }
 
   Rex::Logger::debug( "Current Error-Code: " . $self->{ssh}->error() );
-  Rex::Logger::info("Connected and authenticated to $server.");
+  Rex::Logger::debug("Connected and authenticated to $server.");
 
   $self->{connected} = 1;
   $self->{auth_ret}  = 1;
 
-  $self->{sftp} = $self->{ssh}->sftp;
+  eval { $self->{sftp} = $self->{ssh}->sftp; };
 }
 
 sub reconnect {

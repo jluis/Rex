@@ -12,7 +12,7 @@ use warnings;
 # VERSION
 
 use Rex::Helper::File::Spec;
-use File::Basename qw(dirname);
+use File::Basename qw(basename dirname);
 require Exporter;
 
 use base qw(Exporter);
@@ -24,8 +24,9 @@ use Rex::Commands;
 require Rex::Config;
 
 use Rex::Interface::Exec;
+use Rex::Interface::Fs;
 
-@EXPORT = qw(get_file_path get_tmp_file resolv_path parse_path);
+@EXPORT = qw(get_file_path get_tmp_file resolv_path parse_path resolve_symlink);
 
 set "path_map", {};
 
@@ -43,9 +44,22 @@ sub get_file_path {
     $ends_with_slash = 1;
   }
 
+  my $has_wildcard = 0;
+  my $base_name    = basename($file_name);
+
+  if ( $base_name =~ qr{\*} ) {
+    $has_wildcard = 1;
+    $file_name    = dirname($file_name);
+  }
+
   my $fix_path = sub {
     my ($path) = @_;
     $path =~ s:^\./::;
+
+    if ($has_wildcard) {
+      $path = Rex::Helper::File::Spec->catfile( $path, $base_name );
+    }
+
     if ($ends_with_slash) {
       if ( $path !~ m/\/$/ ) {
         return "$path/";
@@ -63,6 +77,10 @@ sub get_file_path {
   # first get the absolute path to the rexfile
 
   $::rexfile ||= $0;
+
+  if ( $caller_file =~ m|^/loader/[^/]+/__Rexfile__.pm$| ) {
+    $caller_file = $::rexfile;
+  }
 
   my @path_parts;
   if ( $^O =~ m/^MSWin/ && !Rex::is_ssh() ) {
@@ -215,6 +233,27 @@ sub parse_path {
   }
 
   return $path;
+}
+
+sub resolve_symlink {
+  my $path = shift;
+  my $fs   = Rex::Interface::Fs::create();
+  my $resolution;
+
+  if ( $fs->is_symlink($path) ) {
+    while ( my $link = $fs->readlink($path) ) {
+      if ( $link !~ m/^\// ) {
+        $path = dirname($path) . "/" . $link;
+      }
+      else {
+        $path = $link;
+      }
+      $link = $fs->readlink($link);
+    }
+    $resolution = $path;
+  }
+
+  return $resolution;
 }
 
 1;

@@ -31,6 +31,7 @@ use warnings;
 
 #require Exporter;
 require Rex::Exporter;
+use Net::OpenSSH::ShellQuoter;
 use Data::Dumper;
 use Rex;
 use Rex::Logger;
@@ -57,7 +58,15 @@ use base qw(Rex::Exporter);
 
 @EXPORT = qw(run can_run sudo);
 
-=head2 run($command [, $callback])
+=head2 run($command [, $callback], %options)
+
+=head2 run($command, $arguments, %options)
+
+This form will execute $command with the given $arguments.
+$arguments must be an array reference. The arguments will be quoted.
+
+ run "ls", ["-l", "-t", "-r", "-a"];
+ run "ls", ["/tmp", "-l"], auto_die => TRUE;
 
 =head2 run($command_description, command => $command, %options)
 
@@ -78,27 +87,30 @@ in the $? variable.
 
 Supported options are:
 
-  cwd           => $path
+  cwd             => $path
     sets the working directory of the executed command to $path
-  only_if       => $condition_command
+  only_if         => $condition_command
     executes the command only if $condition_command completes successfully
-  unless        => $condition_command
+  unless          => $condition_command
     executes the command unless $condition_command completes successfully
-  only_notified => TRUE
+  only_notified   => TRUE
     queues the command, to be executed upon notification (see below)
-  env           => { var1 => $value1, ..., varN => $valueN }
+  env             => { var1 => $value1, ..., varN => $valueN }
     sets environment variables in the environment of the command
-  timeout       => value
+  timeout         => value
     sets the timeout for the command to be run
-  auto_die      => TRUE
+  auto_die        => TRUE
     die if the command returns with a non-zero exit code
     it can be set globally via the exec_autodie feature flag
-  command       => $command_to_run
+  command         => $command_to_run
     if set, run tries to execute the specified command and the first argument
     becomes an identifier for the run block (e.g. to be triggered with notify)
-  creates       => $file_to_create
+  creates         => $file_to_create
     tries to create $file_to_create upon execution
     skips execution if the file already exists
+  continuous_read => $callback
+    calls $callback subroutine reference for each line of the command's output,
+    passing the line as an argument
 
 Examples:
 
@@ -140,8 +152,8 @@ If you want to end the command upon receiving a certain output:
 =cut
 
 our $LAST_OUTPUT; # this variable stores the last output of a run.
- # so that it is possible to get for example the output of an apt-get update
- # that is called through >> install "foo" <<
+                  # so that it is possible to get for example the output of an apt-get update
+                  # that is called through >> install "foo" <<
 
 sub run {
   my $cmd = shift;
@@ -157,6 +169,12 @@ sub run {
   if ( ref $_[0] eq "CODE" ) {
     $code = shift;
   }
+
+  my ($args);
+  if ( ref $_[0] eq "ARRAY" ) {
+    $args = shift;
+  }
+
   if ( scalar @_ > 0 ) {
     $option = {@_};
   }
@@ -234,6 +252,12 @@ sub run {
     }
 
     my $exec = Rex::Interface::Exec->create;
+
+    if ( $args && ref($args) eq "ARRAY" ) {
+      my $quoter = Net::OpenSSH::ShellQuoter->quoter( $exec->shell->name );
+      $cmd = "$cmd " . join( " ", map { $quoter->quote($_) } @{$args} );
+    }
+
     if ( exists $option->{timeout} && $option->{timeout} > 0 ) {
       eval {
         local $SIG{ALRM} = sub { die("timeout"); };
@@ -331,41 +355,59 @@ sub can_run {
 
 =head2 sudo
 
-Run a command with I<sudo>. Define the password for sudo with I<sudo_password>.
+Run a single command, a code block, or all commands with C<sudo>. You need perl to be available on the remote systems to use C<sudo>.
 
-You can use this function to run one command with sudo privileges or to turn on sudo globally.
+Depending on your remote sudo configuration, you may need to define a sudo password with I<sudo_password> first:
 
- user "unprivuser";
- sudo_password "f00b4r";
- sudo -on;  # turn sudo globally on
+ sudo_password 'my_sudo_password'; # hardcoding
 
- task prepare => sub {
-   install "apache2";
-   file "/etc/ntp.conf",
-     source => "files/etc/ntp.conf",
-     owner  => "root",
-     mode  => 640;
+Or alternatively, since Rexfile is plain perl, you can read the password from terminal at the start:
+
+ use Term::ReadKey;
+ 
+ print 'I need sudo password: ';
+ ReadMode('noecho');
+ sudo_password ReadLine(0);
+ ReadMode('restore');
+
+Similarly, it is also possible to read it from a secret file, database, etc.
+
+You can turn sudo on globally with:
+
+ sudo TRUE; # run _everything_ with sudo
+
+To run only a specific command with sudo, use :
+
+ say sudo 'id';                # passing a remote command directly
+ say sudo { command => 'id' }; # passing anonymous hashref
+ 
+ say sudo { command => 'id', user => 'different' }; # run a single command with sudo as different user
+ 
+ # running a single command with sudo as different user, and `cd` to another directory too
+ say sudo { command => 'id', user => 'different', cwd => '/home/different' };
+
+To run multiple commands with C<sudo>, either use an anonymous code reference directly:
+
+ sudo sub {
+     service 'nginx' => 'restart';
+     say run 'id';
  };
 
-Or, if you didn't enable sudo globally:
+or pass it via C<command> (optionally along a different user):
 
- task prepare => sub {
-   file "/tmp/foo.txt",
-     content => "this file was written without sudo privileges\n";
-
-   # everything in this section will be executed with sudo privileges
-   sudo sub {
-     install "apache2";
-     file "/tmp/foo2.txt",
-       content => "this file was written with sudo privileges\n";
-   };
+ sudo {
+     command => sub {
+         say run 'id';
+         say run 'pwd', cwd => '/home/different';
+     },
+     user => 'different',
  };
 
-Run only one command within sudo.
+B<Note> that some users receive the error C<sudo: sorry, you must have a tty
+to run sudo>. In this case you have to disable C<requiretty> for this user.
+You can do this in your sudoers file with the following code:
 
- task "eth1-down", sub {
-  sudo "ifconfig eth1 down";
- };
+   Defaults:$username !requiretty
 
 =cut
 
@@ -399,7 +441,7 @@ sub sudo {
     $ret = &$cmd();
   }
   else {
-    $ret = i_run($cmd);
+    $ret = i_run( $cmd, fail_ok => 1 );
   }
 
   Rex::get_current_connection_object()->pop_use_sudo();

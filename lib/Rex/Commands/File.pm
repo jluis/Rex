@@ -14,20 +14,20 @@ With this module you can manipulate files.
 
 =head1 SYNOPSIS
 
- task "read-passwd", "server01", sub {
+ task "read_passwd", "server01", sub {
    my $fh = file_read "/etc/passwd";
-   for my $line = ($fh->read_all) {
+   for my $line ($fh->read_all) {
      print $line;
    }
    $fh->close;
  };
  
- task "read-passwd2", "server01", sub {
+ task "read_passwd2", "server01", sub {
    say cat "/etc/passwd";
  };
 
 
- task "write-passwd", "server01", sub {
+ task "write_passwd", "server01", sub {
    my $fh = file_write "/etc/passwd";
    $fh->write("root:*:0:0:root user:/root:/bin/sh\n");
    $fh->close;
@@ -49,7 +49,8 @@ With this module you can manipulate files.
    owner  => "root",
    group  => "root",
    mode  => 400,
-   on_change => sub { say "File was changed."; };
+   on_change => sub { say shift, " was changed."; },
+   on_no_change => sub { say shift, " wasn't changed."; };
 
 
 =head1 EXPORTED FUNCTIONS
@@ -70,11 +71,10 @@ use Rex::Config;
 use Rex::FS::File;
 use Rex::Commands::Upload;
 use Rex::Commands::MD5;
-use Rex::Commands::Run;
 use Rex::File::Parser::Data;
+use Rex::Helper::File::Spec;
 use Rex::Helper::System;
 use Rex::Helper::Path;
-use Rex::Helper::Run;
 use Rex::Hook;
 use Carp;
 
@@ -100,9 +100,38 @@ use vars qw(%file_handles);
 
 Parse a template and return the content.
 
+=head3 Embedded templates
+
+Use C<__DATA__> to embed templates at the end of the file. Prefix embedded template names with C<@>. If embedding multiple templates, mark their end with C<@end>.
+
+=head4 Single template
+
+ my $content = template( '@hello', name => 'world' ); # Hello, world!
+ __DATA__
+ @hello
+ Hello, <%= $name -%>!
+
+=head4 Multiple templates
+
+Use C<@end> to separate multiple templates inside C<__DATA__>.
+
+ my $content     = template( '@hello', name => 'world' ); # Hello, world!
+ my $alternative = template( '@hi',    name => 'world' ); # Hi, world!
+
+ __DATA__
+ @hello
+ Hello, <%= $name -%>!
+ @end
+
+ @hi
+ Hi, <%= $name -%>!
+ @end
+
+=head3 File templates
+
  my $content = template("/files/templates/vhosts.tpl",
-              name => "test.lan",
-              webmaster => 'webmaster@test.lan');
+               name      => "test.lan",
+               webmaster => 'webmaster@test.lan');
 
 The file name specified is subject to "path_map" processing as documented
 under the file() function to resolve to a physical file name.
@@ -117,16 +146,13 @@ exists. E.g. if rex is started as:
 then in task1 defined as:
 
  task "task1", sub {
-
     say template("files/etc/ntpd.conf");
-
  };
 
 will print the content of 'files/etc/ntpd.conf.prod' if it exists.
 
 Note: the appended environment mechanism is always applied, after
 the 'path_map' mechanism, if that is configured.
-
 
 =cut
 
@@ -177,7 +203,8 @@ sub template {
       $content = eval { local ( @ARGV, $/ ) = ($file); <>; };
     }
     elsif ( $file =~ m/^\@/ ) {
-      my @caller    = caller(0);
+      my @caller = caller(0);
+
       my $file_path = Rex::get_module_path( $caller[0] );
 
       if ( !-f $file_path ) {
@@ -194,7 +221,11 @@ sub template {
         elsif ( -f $caller[1] ) {
           $file_path = $caller[1];
         }
+        elsif ( $caller[1] =~ m|^/loader/[^/]+/__Rexfile__.pm$| ) {
+          $file_path = $INC{"__Rexfile__.pm"};
+        }
       }
+
       my $file_content = eval { local ( @ARGV, $/ ) = ($file_path); <>; };
       my ($data) = ( $file_content =~ m/.*__DATA__(.*)/ms );
       my $fp = Rex::File::Parser::Data->new( data => [ split( /\n/, $data ) ] );
@@ -267,7 +298,8 @@ This function is the successor of I<install file>. Please use this function to u
      owner  => "user",
      group  => "group",
      mode   => 700,
-     on_change => sub { say "Something was changed." };
+     on_change => sub { say "Something was changed." },
+     on_no_change => sub { say "Nothing has changed." };
  
    file "/etc/motd",
      content => `fortune`;
@@ -290,18 +322,18 @@ This function is the successor of I<install file>. Please use this function to u
  
  };
 
-The I<source> is a string or an array reference in the later case the
-function is called for all strings in the array. The following constructs 
+The first parameter is either a string or an array reference. In the latter case the
+function is called for all strings in the array. Therefore, the following constructs 
 are equivalent:
 
   file '/tmp/test1', ensure => 'directory';
   file '/tmp/test2', ensure => 'directory';
 
-  file [ qw( /tmp/test1 /tmp/test2 ) ], ensure => 'directory'; #use array ref
+  file [ qw( /tmp/test1 /tmp/test2 ) ], ensure => 'directory'; # use array ref
 
-  file [ glob('/tmp/test{1,2}') ], ensure => 'directory'; #explicit glob call for array contents
+  file [ glob('/tmp/test{1,2}') ], ensure => 'directory'; # explicit glob call for array contents
 
-Use the glob carefully as B<it can leak local filesystem information> (when using wildcards).
+Use the glob carefully as B<it can leak local filesystem information> (e.g. when using wildcards).
 
 The I<source> is subject to a path resolution algorithm. This algorithm
 can be configured using the I<set> function to set the value of the
@@ -334,25 +366,33 @@ you use Perl packages.
 All the possible variables ('{environment}', '{hostname}', ...) are documented
 in the CMDB YAML documentation.
 
-This function supports the following hooks:
+=head3 Hooks
 
-=over 8
+This function supports the following L<hooks|Rex::Hook>:
+
+=over 4
 
 =item before
 
-This gets executed before everything is done. The return value of this hook overwrite the original parameters of the function-call.
+This gets executed before anything is done. All original parameters are passed to it, including the applied defaults (C<ensure => 'present', resolved path for C<source>).
+
+The return value of this hook overwrites the original parameters of the function call.
 
 =item before_change
 
-This gets executed right before the new file is written. Only with I<content> parameter. For the I<source> parameter the hook of the upload function is used.
+This gets executed right before the new file is written. All original parameters are passed to it, including the applied defaults (C<ensure => 'present', resolved path for C<source>).
+
+Only called when the C<content> parameter is used. For the C<source> parameter, the L<upload|Rex::Commands::Upload#upload> hooks are used.
 
 =item after_change
 
-This gets executed right after the file was written. Only with I<content> parameter. For the I<source> parameter the hook of the upload function is used.
+This gets executed right after the file is written. All original parameters, including the applied defaults (C<ensure => 'present', resolved path for C<source>), and any returned results are passed to it.
+
+Only called when the C<content> parameter is used. For the C<source> parameter, the L<upload|Rex::Commands::Upload#upload> hooks are used.
 
 =item after
 
-This gets executed right before the file() function returns.
+This gets executed right before the C<file()> function returns. All original parameters, including the applied defaults (C<ensure => 'present', resolved path for C<source>), and any returned results are passed to it.
 
 =back
 
@@ -385,9 +425,21 @@ sub file {
     $option->{source} = resolv_path( $option->{source} );
   }
 
+  # default: ensure = present
+  $option->{ensure} ||= "present";
+
+  my $fs = Rex::Interface::Fs->create;
+
+  if ( $option->{ensure} ne 'absent' && $fs->is_symlink($file) ) {
+    my $original_file = $file;
+    $file = resolve_symlink($file);
+    Rex::Logger::info(
+      "$original_file is a symlink, operating on $file instead", 'warn' );
+  }
+
   #### check and run before hook
   eval {
-    my @new_args = Rex::Hook::run_hook( file => "before", @_ );
+    my @new_args = Rex::Hook::run_hook( file => "before", $file, %{$option} );
     if (@new_args) {
       ( $file, @options ) = @new_args;
       $option = {@options};
@@ -398,23 +450,21 @@ sub file {
   };
   ##############################
 
-  # default: ensure = present
-  $option->{ensure} ||= "present";
-
   Rex::get_current_connection()->{reporter}
     ->report_resource_start( type => "file", name => $file );
 
-  my $need_md5 = ( $option->{"on_change"} && !$is_directory ? 1 : 0 );
-  my $on_change = $option->{"on_change"} || sub { };
-
-  my $fs = Rex::Interface::Fs->create;
+  my $need_md5     = ( $option->{"on_change"} && !$is_directory ? 1 : 0 );
+  my $on_change    = $option->{"on_change"}    || sub { };
+  my $on_no_change = $option->{"on_no_change"} || sub { };
 
   my $__ret = { changed => 0 };
 
   my ( $new_md5, $old_md5 );
-  eval { $old_md5 = md5($file); };
 
-  if ( exists $option->{no_overwrite} && $option->{no_overwrite} && $old_md5 ) {
+  if ( exists $option->{no_overwrite}
+    && $option->{no_overwrite}
+    && $fs->is_file($file) )
+  {
     Rex::Logger::debug(
       "File already exists and no_overwrite option given. Doing nothing.");
     $__ret = { changed => 0 };
@@ -431,15 +481,9 @@ sub file {
     # first upload file to tmp location, to get md5 sum.
     # than we can decide if we need to replace the current (old) file.
 
-    my @splitted_file = split( /[\/\\]/, $file );
-    my $file_name     = ".rex.tmp." . pop(@splitted_file);
-    my $tmp_file_name = (
-      $#splitted_file != -1
-      ? ( join( "/", @splitted_file ) . "/" . $file_name )
-      : $file_name
-    );
+    my $tmp_file_name = get_tmp_file_name($file);
 
-    my $fh = file_write($tmp_file_name);
+    my $fh    = file_write($tmp_file_name);
     my @lines = split( qr{$/}, $option->{"content"} );
     for my $line (@lines) {
       $fh->write( $line . $/ );
@@ -447,6 +491,7 @@ sub file {
     $fh->close;
 
     # now get md5 sums
+    eval { $old_md5 = md5($file); };
     $new_md5 = md5($tmp_file_name);
 
     if ( $new_md5 && $old_md5 && $new_md5 eq $old_md5 ) {
@@ -471,7 +516,7 @@ sub file {
       );
 
       #### check and run before_change hook
-      Rex::Hook::run_hook( file => "before_change", @_ );
+      Rex::Hook::run_hook( file => "before_change", $file, %{$option} );
       ##############################
 
       if (Rex::is_sudo) {
@@ -496,7 +541,7 @@ sub file {
       );
 
       #### check and run after_change hook
-      Rex::Hook::run_hook( file => "after_change", @_, $__ret );
+      Rex::Hook::run_hook( file => "after_change", $file, %{$option}, $__ret );
       ##############################
 
     }
@@ -508,6 +553,8 @@ sub file {
 
     # HOOKS: for this case you have to use the upload hooks!
     $__ret = upload $option->{"source"}, "$file", force => 1;
+
+    $need_md5 = 0 if $__ret->{changed} == 0;
   }
 
   if ( exists $option->{"ensure"} ) {
@@ -515,7 +562,7 @@ sub file {
       if ( !$fs->is_file($file) ) {
 
         #### check and run before_change hook
-        Rex::Hook::run_hook( file => "before_change", @_ );
+        Rex::Hook::run_hook( file => "before_change", $file, %{$option} );
         ##############################
 
         my $fh = file_write($file);
@@ -529,7 +576,10 @@ sub file {
         );
 
         #### check and run after_change hook
-        Rex::Hook::run_hook( file => "after_change", @_, $__ret );
+        Rex::Hook::run_hook(
+          file => "after_change",
+          $file, %{$option}, $__ret
+        );
         ##############################
 
       }
@@ -540,12 +590,9 @@ sub file {
     }
     elsif ( $option->{ensure} eq "absent" ) {
       $need_md5 = 0;
-      delete $option->{mode};
-      delete $option->{group};
-      delete $option->{owner};
 
       #### check and run before_change hook
-      Rex::Hook::run_hook( file => "before_change", @_ );
+      Rex::Hook::run_hook( file => "before_change", $file, %{$option} );
       ##############################
 
       if ( $fs->is_file($file) ) {
@@ -570,7 +617,7 @@ sub file {
       }
 
       #### check and run after_change hook
-      Rex::Hook::run_hook( file => "after_change", @_, $__ret );
+      Rex::Hook::run_hook( file => "after_change", $file, %{$option}, $__ret );
       ##############################
 
     }
@@ -587,7 +634,7 @@ sub file {
         $dir_option{mode} = $option->{mode};
       }
 
-      Rex::Commands::Fs::mkdir( $file, %dir_option );
+      Rex::Commands::Fs::mkdir( $file, %dir_option, on_change => $on_change );
     }
   }
 
@@ -600,7 +647,7 @@ sub file {
     if ( !$fs->is_file($file) && !$is_directory ) {
 
       #### check and run before_change hook
-      Rex::Hook::run_hook( file => "before_change", @_ );
+      Rex::Hook::run_hook( file => "before_change", $file, %{$option} );
       ##############################
 
       my $fh = file_write($file);
@@ -618,7 +665,7 @@ sub file {
       );
 
       #### check and run after_change hook
-      Rex::Hook::run_hook( file => "after_change", @_, $__ret );
+      Rex::Hook::run_hook( file => "after_change", $file, %{$option}, $__ret );
       ##############################
 
     }
@@ -696,15 +743,34 @@ sub file {
   if ( $__ret->{changed} == 1 && $on_change_done == 0 ) {
     &$on_change($file);
   }
+  elsif ( $__ret->{changed} == 0 ) {
+    Rex::Logger::debug(
+      "File $file has not been changed... Running on_no_change");
+    &$on_no_change($file);
+  }
 
   #### check and run after hook
-  Rex::Hook::run_hook( file => "after", @_, $__ret );
+  Rex::Hook::run_hook( file => "after", $file, %{$option}, $__ret );
   ##############################
 
   Rex::get_current_connection()->{reporter}
     ->report_resource_end( type => "file", name => $file );
 
   return $__ret->{changed};
+}
+
+sub get_tmp_file_name {
+  my $file = shift;
+
+  my $dirname  = dirname($file);
+  my $filename = ".rex.tmp." . basename($file);
+
+  my $tmp_file_name =
+      $dirname eq '.'
+    ? $filename
+    : Rex::Helper::File::Spec->catfile( $dirname, $filename );
+
+  return $tmp_file_name;
 }
 
 =head2 file_write($file_name)
@@ -720,7 +786,7 @@ On failure it will die.
  
  # catch an error
  if($@) {
-   print "An error occured. $@.\n";
+   print "An error occurred. $@.\n";
  }
  
  # work with the filehandle
@@ -777,7 +843,7 @@ On failure it will die.
  
  # catch an error
  if($@) {
-   print "An error occured. $@.\n";
+   print "An error occurred. $@.\n";
  }
  
  # work with the filehandle
@@ -849,6 +915,8 @@ sub delete_lines_matching {
 
   my $fs = Rex::Interface::Fs->create;
 
+  my %stat = $fs->stat($file);
+
   if ( !$fs->is_file($file) ) {
     Rex::Logger::info("File: $file not found.");
     die("$file not found");
@@ -859,16 +927,13 @@ sub delete_lines_matching {
     die("$file not writable");
   }
 
-  my $nl = $/;
+  my $nl      = $/;
   my @content = split( /$nl/, cat($file) );
 
   my $old_md5 = "";
   eval { $old_md5 = md5($file); };
 
-  my $fh = file_write $file;
-  unless ($fh) {
-    die("Can't open $file for writing");
-  }
+  my @new_content;
 
 OUT:
   for my $line (@content) {
@@ -879,9 +944,14 @@ OUT:
       }
     }
 
-    $fh->write( $line . $nl );
+    push @new_content, $line;
   }
-  $fh->close;
+
+  file $file,
+    content => join( $nl, @new_content ),
+    owner   => $stat{uid},
+    group   => $stat{gid},
+    mode    => $stat{mode};
 
   my $new_md5 = "";
   eval { $new_md5 = md5($file); };
@@ -902,7 +972,7 @@ OUT:
 
 =head2 delete_lines_according_to($search, $file, @options)
 
-This is the successor of the delete_lines_matching() function. This function also allows the usage of an on_change hook.
+This is the successor of the delete_lines_matching() function. This function also allows the usage of on_change and on_no_change hooks.
 
 It will search for $search in $file and remove the found lines. If on_change hook is present it will execute this if the file was changed.
 
@@ -919,8 +989,9 @@ sub delete_lines_according_to {
   my ( $search, $file, @options ) = @_;
   $file = resolv_path($file);
 
-  my $option = {@options};
-  my $on_change = $option->{on_change} || undef;
+  my $option       = {@options};
+  my $on_change    = $option->{on_change}    || undef;
+  my $on_no_change = $option->{on_no_change} || undef;
 
   my ( $old_md5, $new_md5 );
 
@@ -930,11 +1001,14 @@ sub delete_lines_according_to {
 
   delete_lines_matching( $file, $search );
 
-  if ($on_change) {
+  if ( $on_change || $on_no_change ) {
     $new_md5 = md5($file);
 
     if ( $old_md5 ne $new_md5 ) {
-      &$on_change($file);
+      &$on_change($file) if $on_change;
+    }
+    else {
+      &$on_no_change($file) if $on_no_change;
     }
   }
 
@@ -981,8 +1055,11 @@ found, it will be updated. Otherwise, it will be appended.
      line  => "mygroup:*:100:myuser3,myuser4",
      regexp => qr{^mygroup},
      on_change => sub {
-                say "file was changed, do something.";
-              };
+       say "file was changed, do something.";
+     },
+     on_no_change => sub {
+       say "file was not changed, do something.";
+     };
  };
 
 =cut
@@ -999,7 +1076,7 @@ sub _append_or_update {
   my ( $new_line, @m );
 
   # check if parameters are in key => value format
-  my ( $option, $on_change );
+  my ( $option, $on_change, $on_no_change );
 
   Rex::get_current_connection()->{reporter}
     ->report_resource_start( type => $action, name => $file );
@@ -1020,22 +1097,35 @@ sub _append_or_update {
     elsif ( ref $option->{regexp} eq "ARRAY" ) {
       @m = @{ $option->{regexp} };
     }
-    $on_change = $option->{on_change} || undef;
+    $on_change    = $option->{on_change}    || undef;
+    $on_no_change = $option->{on_no_change} || undef;
     1;
   } or do {
     ( $new_line, @m ) = @_;
 
-    # check if something in @m (the regexpes) is named on_change
-    for ( my $i = 0 ; $i < $#m ; $i++ ) {
-      if ( $m[$i] eq "on_change" && ref( $m[ $i + 1 ] ) eq "CODE" ) {
-        $on_change = $m[ $i + 1 ];
-        splice( @m, $i, 2 );
-        last;
+    # check if something in @m (the regexpes) is named on_change or on_no_change
+    for my $option ( [ on_change => \$on_change ],
+      [ on_no_change => \$on_no_change ] )
+    {
+      for ( my $i = 0 ; $i < $#m ; $i++ ) {
+        if ( $m[$i] eq $option->[0] && ref( $m[ $i + 1 ] ) eq "CODE" ) {
+          ${ $option->[1] } = $m[ $i + 1 ];
+          splice( @m, $i, 2 );
+          last;
+        }
       }
     }
   };
 
+  unless ( defined $new_line ) {
+    my ( undef, undef, undef, $subroutine ) = caller(1);
+    $subroutine =~ s/^.*:://;
+    die "Undefined new line while trying to run $subroutine on $file";
+  }
+
   my $fs = Rex::Interface::Fs->create;
+
+  my %stat = $fs->stat($file);
 
   my ( $old_md5, $ret );
   $old_md5 = md5($file);
@@ -1060,50 +1150,47 @@ sub _append_or_update {
         $match = qr{$match};
       }
       if ( $content->[$line] =~ $match ) {
-        return 0 if $action eq 'append_if_no_such_line';
-        $content->[$line] = "$new_line";
         $found = 1;
+        last if $action eq 'append_if_no_such_line';
+        $content->[$line] = "$new_line";
       }
     }
   }
 
-  push @$content, "$new_line" unless $found;
-
-  eval {
-    my $fh = file_write $file;
-    unless ($fh) {
-      die("can't open file for writing");
-    }
-    $fh->write( join( "\n", @$content ) );
-    $fh->write("\n");
-    $fh->close;
-    $ret = 0;
-    1;
-  } or do {
-    $ret = 3;
-  };
-
-  if ( $ret == 1 ) {
-    die("Can't open $file for reading");
+  my $new_md5;
+  if ( $action eq 'append_if_no_such_line' && $found ) {
+    $new_md5 = $old_md5;
   }
-  elsif ( $ret == 2 ) {
-    die("Can't open temp file for writing");
-  }
-  elsif ( $ret == 3 ) {
-    die("Can't open $file for writing");
+  else {
+    push @$content, "$new_line" unless $found;
+
+    file $file,
+      content => join( "\n", @$content ),
+      owner   => $stat{uid},
+      group   => $stat{gid},
+      mode    => $stat{mode};
+    $new_md5 = md5($file);
   }
 
-  my $new_md5 = md5($file);
-
-  if ($on_change) {
+  if ( $on_change || $on_no_change ) {
     if ( $old_md5 && $new_md5 && $old_md5 ne $new_md5 ) {
-      $old_md5 ||= "";
+      if ($on_change) {
+        $old_md5 ||= "";
+        $new_md5 ||= "";
+
+        Rex::Logger::debug("File $file has been changed... Running on_change");
+        Rex::Logger::debug("old: $old_md5");
+        Rex::Logger::debug("new: $new_md5");
+        &$on_change($file);
+      }
+    }
+    elsif ($on_no_change) {
       $new_md5 ||= "";
 
-      Rex::Logger::debug("File $file has been changed... Running on_change");
-      Rex::Logger::debug("old: $old_md5");
-      Rex::Logger::debug("new: $new_md5");
-      &$on_change($file);
+      Rex::Logger::debug(
+        "File $file has not been changed (md5 $new_md5)... Running on_no_change"
+      );
+      &$on_no_change($file);
     }
   }
 
@@ -1226,6 +1313,8 @@ Search some string in a file and replace it.
     multiline => TRUE;
  };
 
+Like similar file management commands, it also supports C<on_change> and C<on_no_change> hooks.
+
 =cut
 
 sub sed {
@@ -1243,7 +1332,8 @@ sub sed {
     $options = {@option};
   }
 
-  my $on_change = $options->{"on_change"} || undef;
+  my $on_change    = $options->{"on_change"}    || undef;
+  my $on_no_change = $options->{"on_no_change"} || undef;
 
   my @content;
 
@@ -1263,11 +1353,12 @@ sub sed {
 
   my $ret = file(
     $file,
-    content   => join( "\n", @content ),
-    on_change => $on_change,
-    owner     => $stat{uid},
-    group     => $stat{gid},
-    mode      => $stat{mode}
+    content      => join( "\n", @content ),
+    on_change    => $on_change,
+    on_no_change => $on_no_change,
+    owner        => $stat{uid},
+    group        => $stat{gid},
+    mode         => $stat{mode}
   );
 
   Rex::get_current_connection()->{reporter}

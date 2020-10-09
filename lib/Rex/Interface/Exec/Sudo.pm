@@ -75,7 +75,7 @@ sub exec {
 
   if ($sudo_password) {
     my $random_string = get_random( length($sudo_password), 'a' .. 'z' );
-    my $crypt = $sudo_password ^ $random_string;
+    my $crypt         = $sudo_password ^ $random_string;
 
     $random_file = get_tmp_file;
 
@@ -199,6 +199,25 @@ EOF
   Rex::Logger::debug("sudo: exec: $real_exec");
 
   return $exec->direct_exec( $real_exec, $option );
+}
+
+sub _exec {
+  my ( $self, $cmd, $path, $option ) = @_;
+
+  my ( $exec, $file, $shell );
+  if ( my $ssh = Rex::is_ssh() ) {
+    if ( ref $ssh eq "Net::OpenSSH" ) {
+      $exec = Rex::Interface::Exec->create("OpenSSH");
+    }
+    else {
+      $exec = Rex::Interface::Exec->create("SSH");
+    }
+  }
+  else {
+    $exec = Rex::Interface::Exec->create("Local");
+  }
+
+  return $exec->_exec( $cmd, $option );
 }
 
 1;

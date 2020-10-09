@@ -26,10 +26,11 @@ use warnings;
 # VERSION
 
 use Rex::Commands -no => [qw/auth/];
-use Rex::Commands::Run;
+use Rex::Helper::Run;
 use Rex::Commands::Fs;
 use Rex::Commands::Virtualization;
 use Rex::Commands::SimpleCheck;
+use Rex::Helper::IP;
 
 BEGIN {
   LWP::UserAgent->use;
@@ -92,6 +93,18 @@ Sets the tasks that should be executed as soon as the VM is available through SS
 
 =cut
 
+=head2 storage('path/to/vm/disk')
+
+Sets the disk path of the virtual machine. Works only on KVM
+
+=cut
+
+sub storage {
+  my ( $self, $folder ) = @_;
+
+  $self->{storage_path} = $folder;
+}
+
 sub setup {
   my ( $self, @tasks ) = @_;
   $self->{__tasks} = \@tasks;
@@ -118,6 +131,18 @@ sub stop {
   my ($self) = @_;
   $self->info;
   vm shutdown => $self->{name};
+}
+
+=head2 destroy()
+
+Destroy the VM.
+
+=cut
+
+sub destroy {
+  my ($self) = @_;
+  $self->info;
+  vm destroy => $self->{name};
 }
 
 =head2 start()
@@ -162,7 +187,24 @@ Executes the given tasks on the VM.
 
 sub provision_vm {
   my ( $self, @tasks ) = @_;
-  die("This method must be overwritten.");
+
+  if ( !@tasks ) {
+    @tasks = @{ $self->{__tasks} } if ( exists $self->{__tasks} );
+  }
+
+  $self->wait_for_ssh();
+
+  for my $task (@tasks) {
+    my $task_o = Rex::TaskList->create()->get_task($task);
+    if ( !$task_o ) {
+      die "Task $task not found.";
+    }
+
+    $task_o->set_auth( %{ $self->{__auth} } );
+    Rex::Commands::set( "box_object", $self );
+    $task_o->run( $self->ip );
+    Rex::Commands::set( "box_object", undef );
+  }
 }
 
 =head2 cpus($count)
@@ -271,15 +313,40 @@ Configure the authentication to the VM.
 
 sub auth {
   my ( $self, %auth ) = @_;
-  $self->{__auth} = \%auth;
+  if (%auth) {
+    $self->{__auth} = \%auth;
+  }
+  else {
+    return $self->{__auth};
+  }
+}
+
+=head2 options(%option)
+
+Addition options for boxes
+
+ $box->options(
+   opt1 => $val1,
+   opt2 => $val2,
+ );
+
+=cut
+
+sub options {
+  my ( $self, %opt ) = @_;
+  if (%opt) {
+    $self->{__options} = \%opt;
+  }
+  else {
+    return $self->{__options};
+  }
 }
 
 sub wait_for_ssh {
   my ( $self, $ip, $port ) = @_;
 
   if ( !$ip ) {
-    ( $ip, $port ) = split( /:/, $self->ip );
-    $port ||= 22;
+    ( $ip, $port ) = Rex::Helper::IP::get_server_and_port( $self->ip, 22 );
   }
 
   print "Waiting for SSH to come up on $ip:$port.";
@@ -295,9 +362,10 @@ sub _download {
   my ($self) = @_;
 
   my $filename = basename( $self->{url} );
-  my $force = $self->{force} || FALSE;
+  my $force    = $self->{force} || FALSE;
+  my $fs       = Rex::Interface::Fs->create;
 
-  if ( is_file("./tmp/$filename") ) {
+  if ( $fs->is_file("./tmp/$filename") ) {
     Rex::Logger::info(
       "File already downloaded. Please remove the file ./tmp/$filename if you want to download a fresh copy."
     );
@@ -331,7 +399,7 @@ sub _download {
           print $fh $data;
 
           my $current_time = [ gettimeofday() ];
-          my $time_diff = tv_interval( $start_time, $current_time );
+          my $time_diff    = tv_interval( $start_time, $current_time );
 
           my $bytes_per_seconds = $current_size / $time_diff;
 
@@ -376,7 +444,7 @@ sub _download {
 
     }
     else {
-      run "wget -c -qO ./tmp/$filename $self->{url}";
+      i_exec "wget", "-c", "-qO", "./tmp/$filename", $self->{url};
 
       if ( $? != 0 ) {
         die(

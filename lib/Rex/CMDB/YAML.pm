@@ -19,6 +19,8 @@ use YAML;
 use Data::Dumper;
 use Hash::Merge qw/merge/;
 
+require Rex::Commands::File;
+
 sub new {
   my $that  = shift;
   my $proto = ref($that) || $that;
@@ -96,29 +98,32 @@ sub get {
   my $all = {};
   Rex::Logger::debug( Dumper( \@files ) );
 
+  # configuration variables
+  my $config_values = Rex::Config->get_all;
+  my %template_vars;
+  for my $key ( keys %{$config_values} ) {
+    if ( !exists $template_vars{$key} ) {
+      $template_vars{$key} = $config_values->{$key};
+    }
+  }
+  $template_vars{environment} = Rex::Commands::environment();
+
   for my $file (@files) {
     Rex::Logger::debug("CMDB - Opening $file");
     if ( -f $file ) {
 
-      #my $content = eval { local ( @ARGV, $/ ) = ($file); <>; };
-      #$content .= "\n";    # for safety
+      my $content = eval { local ( @ARGV, $/ ) = ($file); <>; };
+      my $t       = Rex::Config->get_template_function();
+      $content .= "\n"; # for safety
+      $content = $t->( $content, \%template_vars );
 
-      my $ref = YAML::LoadFile($file);
+      my $ref = YAML::Load($content);
 
       $all = $self->{merger}->merge( $all, $ref );
     }
   }
 
-  if ( !$item ) {
-    return $all;
-  }
-  else {
-    return $all->{$item};
-  }
-
-  Rex::Logger::debug("CMDB - no item ($item) found");
-
-  return;
+  return $all;
 }
 
 1;

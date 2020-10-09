@@ -14,6 +14,7 @@ use warnings;
 require Exporter;
 use Data::Dumper;
 require Rex::Commands;
+use Time::HiRes qw(sleep);
 
 use base qw(Exporter);
 
@@ -31,8 +32,8 @@ sub net_ssh2_exec {
   # REQUIRE_TTY can be turned off by feature no_tty
   if ( !Rex::Config->get_no_tty ) {
     $chan->pty("xterm"); # set to xterm, due to problems with vt100.
-     # if vt100 sometimes the restart of services doesn't work and need a sleep .000001 after the command...
-     # strange bug...
+                         # if vt100 sometimes the restart of services doesn't work and need a sleep .000001 after the command...
+                         # strange bug...
     $chan->pty_size( 4000, 80 );
   }
   $chan->blocking(1);
@@ -43,7 +44,7 @@ sub net_ssh2_exec {
   my $in_err = "";
 
   my $rex_int_conf = Rex::Commands::get("rex_internals") || {};
-  my $buffer_size = 1024;
+  my $buffer_size  = 1024;
   if ( exists $rex_int_conf->{read_buffer_size} ) {
     $buffer_size = $rex_int_conf->{read_buffer_size};
   }
@@ -91,8 +92,20 @@ sub net_ssh2_exec {
 END_READ:
   $chan->send_eof;
 
+  my $wait_c   = 0;
+  my $wait_max = $rex_int_conf->{ssh2_channel_closewait_max} || 500;
   while ( !$chan->eof ) {
     Rex::Logger::debug("Waiting for eof on ssh channel.");
+    sleep 0.002; # wait a little for retry
+    $wait_c++;
+    if ( $wait_c >= $wait_max ) {
+
+      # channel will be force closed.
+      Rex::Logger::debug(
+        "Rex::Helper::SSH2::net_ssh2_exec: force closing channel for command: $cmd"
+      );
+      last;
+    }
   }
 
   $chan->wait_closed;
@@ -100,7 +113,7 @@ END_READ:
 
   # if used with $chan->pty() we have to remove \r
   if ( !Rex::Config->get_no_tty ) {
-    $in =~ s/\r//g     if $in;
+    $in     =~ s/\r//g if $in;
     $in_err =~ s/\r//g if $in_err;
   }
 

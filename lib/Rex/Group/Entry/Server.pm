@@ -17,8 +17,9 @@ use Rex::Config;
 use Rex::Interface::Exec;
 use Data::Dumper;
 use Sort::Naturally;
+use Symbol;
 
-use List::MoreUtils qw(uniq);
+use List::MoreUtils 0.416 qw(uniq);
 
 use overload
   'eq'  => sub { shift->is_eq(@_); },
@@ -31,9 +32,8 @@ use attributes;
 sub function {
   my ( $class, $name, $code ) = @_;
 
-  no strict "refs";
-  *{ $class . "::" . $name } = $code;
-  use strict;
+  my $ref_to_function = qualify_to_ref( $name, $class );
+  *{$ref_to_function} = $code;
 }
 
 sub new {
@@ -212,7 +212,8 @@ sub get_public_key {
 sub get_private_key {
   my ($self) = @_;
 
-  if ( exists $self->{auth}->{private_key} && -f $self->{auth}->{public_key} ) {
+  if ( exists $self->{auth}->{private_key} && -f $self->{auth}->{private_key} )
+  {
     Rex::Logger::debug( "Rex::Group::Entry::Server (private_key): returning "
         . $self->{auth}->{private_key} );
     return $self->{auth}->{private_key};

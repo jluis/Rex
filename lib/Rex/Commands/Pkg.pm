@@ -14,11 +14,16 @@ With this module you can install packages and files.
 
 =head1 SYNOPSIS
 
- install file => "/etc/passwd", {
-              source => "/export/files/etc/passwd"
-            };
-
- install package => "perl";
+ pkg "somepkg",
+   ensure => "present";
+ pkg "somepkg",
+   ensure => "latest",
+   on_change => sub {
+     say "package was updated.";
+     service someservice => "restart";
+   };
+ pkg "somepkg",
+   ensure => "absent";
 
 =head1 EXPORTED FUNCTIONS
 
@@ -40,7 +45,6 @@ use Rex::Commands::Gather;
 use Rex::Hardware;
 use Rex::Commands::MD5;
 use Rex::Commands::Upload;
-use Rex::Commands::Run;
 use Rex::Config;
 use Rex::Commands;
 use Rex::Hook;
@@ -81,9 +85,13 @@ Use this resource to install or update a package. This resource will generate re
 =cut
 
 sub pkg {
-  my ( $res_package, %option ) = @_;
+  my ( $package, %option ) = @_;
 
-  my $package = $res_package;
+  if ( exists $option{package} && ref $option{package} eq "ARRAY" ) {
+    die "The `package´ option can't be an array.";
+  }
+
+  my $res_name = $package;
 
   if ( exists $option{package} ) {
     $package = $option{package};
@@ -91,11 +99,17 @@ sub pkg {
 
   $option{ensure} ||= "present";
 
-  Rex::get_current_connection()->{reporter}
-    ->report_resource_start( type => "pkg", name => $res_package );
+  my @package_list = ref $package eq "ARRAY" ? @{$package} : ($package);
 
-  my $pkg = Rex::Pkg->get;
-  my ($old_package) = grep { $_->{name} eq $package } $pkg->get_installed;
+  foreach my $candidate ( sort @package_list ) {
+    Rex::get_current_connection()->{reporter}->report_resource_start(
+      type => "pkg",
+      name => ( ref $res_name eq "ARRAY" ? $candidate : $res_name )
+    );
+  }
+
+  my $pkg           = Rex::Pkg->get;
+  my @old_installed = $pkg->get_installed;
 
   if ( $option{ensure} eq "latest" ) {
     &update( package => $package, \%option );
@@ -115,45 +129,47 @@ sub pkg {
     die("Unknown ensure parameter: $option{ensure}.");
   }
 
-  my ($new_package) = grep { $_->{name} eq $package } $pkg->get_installed;
-  if ( $old_package
-    && $new_package
-    && $old_package->{version} ne $new_package->{version} )
+  my @new_installed = $pkg->get_installed;
+  my @modifications =
+    $pkg->diff_package_list( \@old_installed, \@new_installed );
+
+  if ( exists $option{on_change}
+    && ref $option{on_change} eq "CODE"
+    && scalar @modifications > 0 )
   {
-    if ( exists $option{on_change} && ref $option{on_change} eq "CODE" ) {
-      $option{on_change}->( $package, %option );
+    $option{on_change}->( $package, %option );
+  }
+
+  foreach my $candidate ( reverse sort @package_list ) {
+
+    my %report_args = ( changed => 0 );
+
+    if ( my ($change) = grep { $candidate eq $_->{name} } @modifications ) {
+      $report_args{changed} = 1;
+
+      my ($old_package) = grep { $_->{name} eq $change->{name} } @old_installed;
+      my ($new_package) = grep { $_->{name} eq $change->{name} } @new_installed;
+
+      if ( $change->{action} eq "updated" ) {
+        $report_args{message} =
+          "Package $change->{name} updated $old_package->{version} -> $new_package->{version}";
+      }
+      elsif ( $change->{action} eq "installed" ) {
+        $report_args{message} =
+          "Package $change->{name} installed in version $new_package->{version}";
+      }
+      elsif ( $change->{action} eq "removed" ) {
+        $report_args{message} = "Package $change->{name} removed.";
+      }
     }
 
-    Rex::get_current_connection()->{reporter}->report(
-      changed => 1,
-      message =>
-        "Package $package updated $old_package->{version} -> $new_package->{version}"
+    Rex::get_current_connection()->{reporter}->report(%report_args);
+
+    Rex::get_current_connection()->{reporter}->report_resource_end(
+      type => "pkg",
+      name => ( ref $res_name eq "ARRAY" ? $candidate : $res_name )
     );
   }
-  elsif ( !$old_package && $new_package ) {
-    Rex::get_current_connection()->{reporter}->report(
-      changed => 1,
-      message => "Package $package installed in version $new_package->{version}"
-    );
-
-    if ( exists $option{on_change} && ref $option{on_change} eq "CODE" ) {
-      $option{on_change}->( $package, %option );
-    }
-  }
-  elsif ( $old_package && !$new_package ) {
-    Rex::get_current_connection()->{reporter}
-      ->report( changed => 1, message => "Package $package removed." );
-
-    if ( exists $option{on_change} && ref $option{on_change} eq "CODE" ) {
-      $option{on_change}->( $package, %option );
-    }
-  }
-  else {
-    Rex::get_current_connection()->{reporter}->report( changed => 0, );
-  }
-
-  Rex::get_current_connection()->{reporter}
-    ->report_resource_end( type => "pkg", name => $res_package );
 }
 
 =head2 install($type, $data, $options)
@@ -224,25 +240,31 @@ This is deprecated since 0.9. Please use L<File> I<file> instead.
 
 =back
 
-This function supports the following hooks:
+This function supports the following L<hooks|Rex::Hook>:
 
-=over 8
+=over 4
 
 =item before
 
-This gets executed before everything is done. The return value of this hook overwrite the original parameters of the function-call.
+This gets executed before anything is done. All original parameters are passed to it.
+
+The return value of this hook overwrites the original parameters of the function-call.
 
 =item before_change
 
-This gets executed right before the new package is installed. This hook is only available for package installations. If you need file hooks, you have to use the file() function.
+This gets executed right before the new package is installed. All original parameters are passed to it.
+
+This hook is only available for package installations. If you need file hooks, you have to use the L<file()|Rex::Commands::File#file> function.
 
 =item after_change
 
-This gets executed right after the new package was installed. This hook is only available for package installations. If you need file hooks, you have to use the file() function.
+This gets executed right after the new package was installed. All original parameters, and the fact of change (C<{ changed => TRUE|FALSE }>) are passed to it.
+
+This hook is only available for package installations. If you need file hooks, you have to use the L<file()|Rex::Commands::File#file> function.
 
 =item after
-
-This gets executed right before the install() function returns.
+ 
+This gets executed right before the C<install()> function returns. All original parameters, and any returned results are passed to it.
 
 =back
 
@@ -321,7 +343,7 @@ sub install {
     }
     else {
 
-      my $source = Rex::Helper::Path::get_file_path( $source, caller() );
+      my $source  = Rex::Helper::Path::get_file_path( $source, caller() );
       my $content = eval { local ( @ARGV, $/ ) = ($source); <>; };
 
       my $local_md5 = "";
@@ -550,6 +572,23 @@ If you want to get the packages that where updated, you can use the I<on_change>
      };
  };
 
+Options for I<update_system>
+
+=over 4
+
+=item update_metadata
+
+Set to I<TRUE> if the package metadata should be updated. Since 1.5 default to I<FALSE> if possible. Before 1.5 it depends on the package manager.
+
+=item update_package
+
+Set to I<TRUE> if you want to update the packages. Default is I<TRUE>.
+
+=item dist_upgrade
+
+Set to I<TRUE> if you want to run a dist-upgrade if your distribution supports it. Default is I<FALSE>.
+
+=back
 
 =cut
 
@@ -561,8 +600,8 @@ sub update_system {
   # the package db for changes
   my @old_installed = $pkg->get_installed;
 
-  eval { $pkg->update_system; };
-  Rex::Logger::info( "An error occured for update_system: $@", "warn" ) if $@;
+  eval { $pkg->update_system(%option); };
+  Rex::Logger::info( "An error occurred for update_system: $@", "warn" ) if $@;
 
   my @new_installed = $pkg->get_installed;
 

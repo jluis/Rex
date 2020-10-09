@@ -11,6 +11,13 @@ use warnings;
 
 # VERSION
 
+BEGIN {
+  # this is for new package format
+  if ( -d '/usr/lib/rex/lib' ) {
+    use lib '/usr/lib/rex/lib';
+  }
+}
+
 $|++;
 
 use LWP::UserAgent;
@@ -20,7 +27,7 @@ use Rex::Config;
 use Rex::Logger;
 use Rex::Commands::Fs;
 use Rex::Commands::File;
-use JSON::XS;
+use JSON::MaybeXS;
 use Cwd qw(getcwd);
 use Carp;
 use URI;
@@ -222,7 +229,7 @@ sub download_recipe_git {
 
   Rex::Logger::info("Cloning $clone_url to $path. Using branch: $branch.");
 
-  system "git clone $url -b $branch '$path'";
+  system "git", "clone", $url, "-b", $branch, $path;
 
   chdir $path;
   resolve_deps("meta.yml");
@@ -232,7 +239,7 @@ sub download_recipe_local_tar_gz {
   my ($url) = @_;
   $Rex::Logger::silent = 0;
 
-  system "tar xzf $url";
+  system "tar", "xzf", $url;
 
   my $path = basename($url);
   $path =~ s/\.tar\.gz$//;
@@ -245,7 +252,7 @@ sub download_recipe_local_tar_gz {
 sub upload_rexfile {
   my (%option) = @_;
 
-  my $tmp_dir = File::Spec->tmpdir;
+  my $tmp_dir  = File::Spec->tmpdir;
   my $tmp_file = File::Spec->catfile( $tmp_dir, basename(getcwd) . ".tar.gz" );
 
   my $login_url = $option{server} . "/login";
@@ -336,7 +343,7 @@ sub dispatch_execute_job {
 sub download_recipe {
   my ($name) = @_;
 
-  if ( $name =~ m/^(https|git):\/\// ) {
+  if ( $name =~ m/^(ssh|https|git):\/\// ) {
 
     # seems to be a git link
     download_recipe_git($name);
@@ -384,8 +391,7 @@ sub download_recipe {
   print $fh $content;
   close($fh);
   chdir("lib");
-  system("tar xvzf ../tmp-mod.tar.gz >dl.log 2>&1");
-  unlink("dl.log");
+  system "tar", "xzf", "../tmp-mod.tar.gz";
   chdir("..");
   unlink("tmp-mod.tar.gz");
 
@@ -409,7 +415,8 @@ sub resolve_deps {
 
   if ( exists $ref->{Require} ) {
     if ( ref $ref->{Require} eq "ARRAY" ) {
-      $deps{$_} = $_ for @{ $ref->{Require} };
+      do { ref $_ eq "HASH" ? $deps{ $_->{name} } = $_ : $deps{$_} = $_ }
+        for @{ $ref->{Require} };
     }
     else {
       %deps = %{ $ref->{Require} };
@@ -418,7 +425,10 @@ sub resolve_deps {
 
   if ( exists $ref->{PerlRequire} ) {
     if ( ref $ref->{PerlRequire} eq "ARRAY" ) {
-      $perl_deps{$_} = $_ for @{ $ref->{PerlRequire} };
+      do {
+        ref $_ eq "HASH" ? $perl_deps{ $_->{name} } = $_ : $perl_deps{$_} = $_;
+        }
+        for @{ $ref->{PerlRequire} };
     }
     else {
       %perl_deps = %{ $ref->{PerlRequire} };
@@ -454,11 +464,11 @@ sub resolve_deps {
         }
 
         if ( -d "$path/.git" ) {
-          system "rm -rf '$path'";
+          rmdir $path;
         }
 
         Rex::Logger::info("Cloning $deps{$req}->{git}#$branch to $path");
-        system "git clone $deps{$req}->{git} -b $branch '$path'";
+        system "git", "clone", $deps{$req}->{git}, "-b", $branch, $path;
         resolve_deps("$path/meta.yml");
       }
     }
@@ -481,7 +491,7 @@ sub resolve_deps {
         }
 
         my $curdir = getcwd;
-        my $path = File::Spec->catdir( File::Spec->tmpdir, "tmp-build-$$" );
+        my $path   = File::Spec->catdir( File::Spec->tmpdir, "tmp-build-$$" );
 
         my $lib_path =
           File::Spec->catdir( File::Spec->rel2abs( File::Spec->curdir() ),
@@ -493,13 +503,13 @@ sub resolve_deps {
         }
 
         Rex::Logger::info("Cloning $perl_deps{$req}->{git}#$branch to $path");
-        system "git clone $perl_deps{$req}->{git} -b $branch '$path'";
+        system "git", "clone", $perl_deps{$req}->{git}, "-b", $branch, $path;
 
         chdir $path;
-        system "cpanm -l '$lib_path' .";
+        system "cpanm", "-l", $lib_path, ".";
         chdir $curdir;
 
-        system "rm -rf '$path'";
+        rmdir $path;
       }
     }
     else {
@@ -508,7 +518,7 @@ sub resolve_deps {
 
       eval "use $req";
       if ($@) {
-        system "cpanm -l '$lib_path' $req";
+        system "cpanm", "-l", $lib_path, $req;
       }
     }
   }
@@ -579,7 +589,14 @@ if ( exists $opts->{bundle} ) {
   close($fh);
 
   # build the perl and application
-  system "pp \@$tmp_args_file -o rex.payload/rex.bin $rex";
+  if ( -d '/usr/lib/rex/lib' ) {
+    system
+      "pp -I /usr/lib/rex/lib \@$tmp_args_file -o rex.payload/rex.bin $rex";
+  }
+  else {
+    system
+      "pp -I /usr/lib/rex/lib \@$tmp_args_file -o rex.payload/rex.bin $rex";
+  }
 
   # find libssh2.so and libexpat.so
   my $arch = qx{uname -m};
@@ -1046,7 +1063,7 @@ Require:
 
 
 @pp.args.tpl
--M Net::OpenSSH::ShellQuoter::POSIX 
+-M Net::OpenSSH::ShellQuoter::POSIX
 -M Net::SFTP::Foreign::Backend::Unix
 -M Sys::Syslog
 -M Net::OpenSSH
@@ -1300,6 +1317,7 @@ Require:
 -M Rex::Commands::Fs
 -M Rex::Commands::Host
 -M Rex::Commands::SCM
+-M Rex::Commands::Mkfs
 -M Rex::Service
 -M Rex::Pkg
 -M Rex::Cron::Linux
@@ -1344,6 +1362,7 @@ Require:
 -M Rex::Service::OpenBSD
 -M Rex::Service::SunOS::svcadm
 -M Rex::Service::SuSE::systemd
+-M Rex::Service::Arch::systemd
 -M Rex
 -M Net::SSH2
 @end

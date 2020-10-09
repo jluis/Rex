@@ -88,6 +88,8 @@ sub new {
 
   $self->{name} ||= $file;
   $self->{redirect_port} = 2222;
+  $self->{memory} ||= 512; # default, in MB
+  $self->{cpu}    ||= 1;   # default
 
   return $self;
 }
@@ -101,6 +103,28 @@ The name of the test. A VM called $name will be created for each test. If the VM
 sub name {
   my ( $self, $name ) = @_;
   $self->{name} = $name;
+}
+
+=head2 memory($amount)
+
+The amount of memory the VM should use, in Megabytes.
+
+=cut
+
+sub memory {
+  my ( $self, $memory ) = @_;
+  $self->{memory} = $memory;
+}
+
+=head2 cpus($number)
+
+The number of CPUs the VM should use.
+
+=cut
+
+sub cpus {
+  my ( $self, $cpus ) = @_;
+  $self->{cpus} = $cpus;
 }
 
 =head2 vm_auth(%auth)
@@ -151,11 +175,19 @@ The task to run on the test VM. You can run multiple tasks by passing an array r
 sub run_task {
   my ( $self, $task ) = @_;
 
+  # allow multiple calls to run_task() without setting up new box
+  if ( $self->{box} ) {
+    $self->{box}->provision_vm($task);
+    return;
+  }
+
   my $box;
   box {
     $box = shift;
     $box->name( $self->{name} );
     $box->url( $self->{vm} );
+    $box->memory( $self->{memory} );
+    $box->cpus( $self->{cpus} );
 
     $box->network(
       1 => {
@@ -184,10 +216,16 @@ sub run_task {
   );
 }
 
-sub ok($;$) {
+sub ok() {
   my ( $self, $test, $msg ) = @_;
   my $tb = Rex::Test::Base->builder;
   $tb->ok( $test, $msg );
+}
+
+sub like {
+  my ( $self, $thing, $want, $name ) = @_;
+  my $tb = Rex::Test::Base->builder;
+  $tb->like( $thing, $want, $name );
 }
 
 sub diag {
@@ -202,7 +240,11 @@ sub finish {
   $tb->is_passing()
     ? print "PASS\n"
     : print "FAIL\n";
+  if ( !$tb->is_passing() ) {
+    Rex::Test::push_exit("FAIL");
+  }
   $tb->reset();
+
   Rex::pop_connection();
 }
 
@@ -256,14 +298,26 @@ sub AUTOLOAD {
     return;
   }
 
-  my $pkg = __PACKAGE__ . "::$method";
+  my $real_method = $method;
+  my $is_not      = 0;
+  if ( $real_method =~ m/^has_not_/ ) {
+    $real_method =~ s/^has_not_/has_/;
+    $is_not = 1;
+  }
+
+  my $pkg = __PACKAGE__ . "::$real_method";
   eval "use $pkg";
   if ($@) {
     confess "Error loading $pkg. No such test method.";
   }
 
   my $p = $pkg->new;
-  $p->run_test(@_);
+  if ($is_not) {
+    $p->run_not_test(@_);
+  }
+  else {
+    $p->run_test(@_);
+  }
 }
 
 1;

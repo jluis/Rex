@@ -15,6 +15,7 @@ require Exporter;
 require Rex::Config;
 use Rex::Resource;
 use Data::Dumper;
+use Symbol;
 use base qw(Exporter);
 use vars qw(@EXPORT);
 
@@ -26,9 +27,11 @@ sub removed { return "removed"; }
 
 sub emit {
   my ( $type, $message ) = @_;
-  if ( !$Rex::Resource::INSIDE_RES ) {
+  if ( !Rex::Resource->is_inside_resource ) {
     die "emit() only allowed inside resource.";
   }
+
+  $message ||= "";
 
   Rex::Logger::debug( "Emiting change: " . $type . " - $message." );
 
@@ -59,6 +62,8 @@ sub resource {
   my ( $name, $options, $function ) = @_;
   my $name_save = $name;
 
+  my $caller_pkg = caller;
+
   if ( ref $options eq "CODE" ) {
     $function = $options;
     $options  = {};
@@ -77,8 +82,11 @@ sub resource {
   my $res = Rex::Resource->new(
     type         => "${class}::$name",
     name         => $name,
-    display_name => ( $options->{name} || $name ),
-    cb           => $function
+    display_name => (
+      $options->{name}
+        || ( $options->{export} ? $name : "${caller_pkg}::${name}" )
+    ),
+    cb => $function
   );
 
   my $func = sub {
@@ -88,38 +96,29 @@ sub resource {
   if (!$class->can($name)
     && $name_save =~ m/^[a-zA-Z_][a-zA-Z0-9_]+$/ )
   {
-    no strict 'refs';
-    Rex::Logger::debug("Registering resource: ${class}::$name_save");
+    if ( $class ne "main" && $class ne "Rex::CLI" ) {
 
-    my $code = $_[-2];
-    *{"${class}::$name_save"} = $func;
-    use strict;
-  }
-  elsif ( ( $class ne "main" && $class ne "Rex::CLI" )
-    && !$class->can($name_save)
-    && $name_save =~ m/^[a-zA-Z_][a-zA-Z0-9_]+$/ )
-  {
-    # if not in main namespace, register the task as a sub
-    no strict 'refs';
-    Rex::Logger::debug(
-      "Registering resource (not main namespace): ${class}::$name_save");
-    my $code = $_[-2];
-    *{"${class}::$name_save"} = $func;
+      # if not in main namespace, register the task as a sub
+      Rex::Logger::debug(
+        "Registering resource (not main namespace): ${class}::$name_save");
+    }
+    else {
+      Rex::Logger::debug("Registering resource: ${class}::$name_save");
+    }
 
-    use strict;
+    my $code            = $_[-2];
+    my $ref_to_resource = qualify_to_ref( $name_save, $class );
+    *{$ref_to_resource} = $func;
   }
 
   if ( exists $options->{export} && $options->{export} ) {
 
     # register in caller namespace
-    no strict 'refs';
-    my ($caller_pkg) = caller(1);
-    if ( $caller_pkg eq "Rex" ) {
-      ($caller_pkg) = caller(2);
-    }
-    Rex::Logger::debug("Registering $name_save in $caller_pkg namespace.");
-    *{"${caller_pkg}::$name_save"} = $func;
-    use strict;
+    my $ref_to_ISA    = qualify_to_ref( 'ISA',    $caller_pkg );
+    my $ref_to_EXPORT = qualify_to_ref( 'EXPORT', $caller_pkg );
+    push @{ *{$ref_to_ISA} }, "Rex::Exporter"
+      unless ( grep { $_ eq "Rex::Exporter" } @{ *{$ref_to_ISA} } );
+    push @{ *{$ref_to_EXPORT} }, $name_save;
   }
 }
 

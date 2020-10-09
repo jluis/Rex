@@ -12,17 +12,18 @@ use warnings;
 # VERSION
 
 use Rex::Logger;
-use Rex::Commands::Run;
 use Rex::Commands::MD5;
 use Rex::Helper::Run;
+use Rex::Helper::Encode;
 use Rex::Commands::Fs;
-use Rex::User::NetBSD;
 use Rex::Interface::File;
 use Rex::Interface::Fs;
 use Rex::Interface::Exec;
+use Rex::User::Linux;
 use Rex::Helper::Path;
+use JSON::MaybeXS;
 
-use base qw(Rex::User::NetBSD);
+use base qw(Rex::User::Linux);
 
 sub new {
   my $that  = shift;
@@ -41,7 +42,8 @@ sub create_user {
 
   my $old_pw_md5 = md5("/etc/passwd");
 
-  my $uid = $self->get_uid($user);
+  my $uid       = $self->get_uid($user);
+  my %user_info = $self->get_user($user);
   my $should_create_home;
 
   if ( $data->{'create_home'} || $data->{'create-home'} ) {
@@ -70,7 +72,17 @@ sub create_user {
     $cmd = "usermod ";
   }
 
-  if ( exists $data->{uid} ) {
+  if ( defined $user_info{uid} ) {
+    if ( exists $data->{uid} ) {
+
+      # On OpenBSD, "usermod -u n login" fails when the user login
+      # has already n as userid. So skip it from the command arg
+      # when the uid is already correct.
+      $cmd .= " -u " . $data->{uid} unless $data->{uid} == $user_info{uid};
+    }
+  }
+  else {
+    # the user does not exist yet.
     $cmd .= " -u " . $data->{uid};
   }
 
@@ -94,6 +106,10 @@ sub create_user {
     $cmd .= " -e '" . $data->{expire} . "'";
   }
 
+  if ( exists $data->{login_class} ) {
+    $cmd .= " -L '" . $data->{login_class} . "'";
+  }
+
   if ( exists $data->{groups} ) {
     my @groups    = @{ $data->{groups} };
     my $pri_group = shift @groups;
@@ -111,7 +127,7 @@ sub create_user {
   $fh->write("$cmd $user\nexit \$?\n");
   $fh->close;
 
-  i_run "/bin/sh $rnd_file";
+  i_run "/bin/sh $rnd_file", fail_ok => 1;
   if ( $? == 0 ) {
     Rex::Logger::debug("User $user created/updated.");
   }
@@ -132,7 +148,7 @@ sub create_user {
         . "') $user\nexit \$?\n" );
     $fh->close;
 
-    i_run "/bin/sh $rnd_file";
+    i_run "/bin/sh $rnd_file", fail_ok => 1;
     if ( $? != 0 ) {
       die("Error setting password for $user");
     }
@@ -149,7 +165,7 @@ sub create_user {
       "usermod -p '" . $data->{crypt_password} . "' $user\nexit \$?\n" );
     $fh->close;
 
-    i_run "/bin/sh $rnd_file";
+    i_run "/bin/sh $rnd_file", fail_ok => 1;
     if ( $? != 0 ) {
       die("Error setting password for $user");
     }
@@ -171,6 +187,127 @@ sub create_user {
       ret     => $self->get_uid($user),
       },
       ;
+  }
+
+}
+
+sub get_user {
+  my ( $self, $user ) = @_;
+
+  Rex::Logger::debug("Getting information for $user");
+  my $rnd_file = get_tmp_file;
+  my $fh       = Rex::Interface::File->create;
+  my $script   = q|
+    unlink $0;
+    print to_json([ getpwnam($ARGV[0]) ]);
+  |;
+  $fh->open( ">", $rnd_file );
+  $fh->write($script);
+  $fh->write( func_to_json() );
+  $fh->close;
+
+  my $data_str = i_run "perl $rnd_file $user", fail_ok => 1;
+  if ( $? != 0 ) {
+    die("Error getting user information for $user");
+  }
+
+  my $data = decode_json($data_str);
+
+  return (
+    name     => $data->[0],
+    password => $data->[1],
+    uid      => $data->[2],
+    gid      => $data->[3],
+    pwchange => $data->[4],
+    class    => $data->[5],
+    comment  => $data->[6],
+    home     => $data->[7],
+    shell    => $data->[8],
+    expire   => $data->[9],
+  );
+}
+
+sub lock_password {
+  my ( $self, $user ) = @_;
+
+  # Is the password already locked?
+  my $result = i_run "getent passwd $user", fail_ok => 1;
+
+  if ( $result !~ /^$user.*$/ ) {
+    die "Unexpected result from getent: $result";
+  }
+  elsif ( $result =~ /^$user.*-$/ ) {
+
+    # Already locked
+    return { changed => 0 };
+  }
+  else {
+    my $ret = i_run "usermod -Z $user", fail_ok => 1;
+    if ( $? != 0 ) {
+      die("Error locking account $user: $ret");
+    }
+    return {
+      changed => 1,
+      ret     => $ret,
+    };
+  }
+}
+
+sub unlock_password {
+  my ( $self, $user ) = @_;
+
+  # Is the password already unlocked?
+  my $result = i_run "getent passwd $user", fail_ok => 1;
+
+  if ( $result !~ /^$user.*$/ ) {
+    die "Unexpected result from getent: $result";
+  }
+  elsif ( $result !~ /^$user.*-$/ ) {
+
+    # Already unlocked
+    return { changed => 0 };
+  }
+  else {
+    my $ret = i_run "usermod -U $user", sub { @_ }, fail_ok => 1;
+    if ( $? != 0 ) {
+      die("Error unlocking account $user: $ret");
+    }
+    return {
+      changed => 1,
+      ret     => $ret,
+    };
+  }
+}
+
+sub rm_user {
+  my ( $self, $user, $data ) = @_;
+
+  Rex::Logger::debug("Removing user $user");
+
+  my %user_info = $self->get_user($user);
+
+  my $cmd = "userdel";
+
+  if ( exists $data->{delete_home} ) {
+    $cmd .= " -r";
+  }
+
+  my $output = i_run $cmd . " " . $user, fail_ok => 1;
+  if ( $? == 67 ) {
+    Rex::Logger::info( "Cannot delete user $user (no such user)", "warn" );
+  }
+  elsif ( $? != 0 ) {
+    die("Error deleting user $user ($output)");
+  }
+
+  if ( exists $data->{delete_home} && is_dir( $user_info{home} ) ) {
+    Rex::Logger::debug(
+      "userdel doesn't delete home directory. removing it now by hand...");
+    rmdir $user_info{home};
+  }
+
+  if ( $? != 0 ) {
+    die( "Error removing " . $user_info{home} );
   }
 
 }

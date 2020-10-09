@@ -17,16 +17,18 @@ use warnings;
 
 use Rex::Logger;
 use Rex::Cloud::Base;
-
+use AWS::Signature4;
+use HTTP::Request::Common;
+use Digest::HMAC_SHA1;
 use base qw(Rex::Cloud::Base);
+use LWP::UserAgent;
+use XML::Simple;
+use Carp;
 
 BEGIN {
   use Rex::Require;
-  LWP::UserAgent->use;
-  Digest::HMAC_SHA1->use;
   HTTP::Date->use(qw(time2isoz));
   MIME::Base64->use(qw(encode_base64 decode_base64));
-  XML::Simple->require;
 }
 
 use Data::Dumper;
@@ -48,6 +50,14 @@ sub new {
   Rex::Logger::debug( "Using API Version: " . $self->{"__version"} );
 
   return $self;
+}
+
+sub signer {
+  my ($self) = @_;
+  return AWS::Signature4->new(
+    -access_key => $self->{__access_key},
+    -secret_key => $self->{__secret_access_key}
+  );
 }
 
 sub set_auth {
@@ -98,19 +108,22 @@ sub run_instance {
       $i++;
     }
   }
-  else {
+  elsif ( !exists $data{options}->{SubnetId} ) {
     $security_group{SecurityGroup} = $security_groups || "default";
   }
 
+  my %more_options = %{ $data{options} || {} };
+
   my $xml = $self->_request(
     "RunInstances",
-    ImageId                      => $data{"image_id"},
-    MinCount                     => 1,
-    MaxCount                     => 1,
-    KeyName                      => $data{"key"},
+    ImageId  => $data{"image_id"},
+    MinCount => 1,
+    MaxCount => 1,
+    KeyName  => $data{"key"},
     InstanceType                 => $data{"type"} || "m1.small",
     "Placement.AvailabilityZone" => $data{"zone"} || "",
-    %security_group
+    %security_group,
+    %more_options,
   );
 
   my $ref = $self->_xml($xml);
@@ -139,7 +152,7 @@ sub run_instance {
     $self->attach_volume(
       volume_id   => $data{"volume"},
       instance_id => $ref->{"instancesSet"}->{"item"}->{"instanceId"},
-      name => "/dev/sdh", # default for new instances
+      name        => "/dev/sdh",                                      # default for new instances
     );
   }
 
@@ -245,7 +258,7 @@ sub create_volume {
 
   my $xml = $self->_request(
     "CreateVolume",
-    "Size" => $data{"size"} || 1,
+    "Size"             => $data{"size"} || 1,
     "AvailabilityZone" => $data{"zone"},
   );
 
@@ -413,13 +426,18 @@ sub _request {
   my ( $self, $action, %args ) = @_;
 
   my $ua = LWP::UserAgent->new;
+  $ua->timeout(300);
   $ua->env_proxy;
   my %param = $self->_sign( $action, %args );
 
   Rex::Logger::debug( "Sending request to: https://" . $self->{'__endpoint'} );
   Rex::Logger::debug( "  $_ -> " . $param{$_} ) for keys %param;
 
-  my $res = $ua->post( "https://" . $self->{'__endpoint'}, \%param );
+  my $req = POST( "https://" . $self->{__endpoint}, [%param] );
+  $self->signer->sign($req);
+
+  #my $res = $ua->post( "https://" . $self->{'__endpoint'}, \%param );
+  my $res = $ua->request($req);
 
   if ( $res->code >= 500 ) {
     Rex::Logger::info( "Error on request", "warn" );
@@ -450,6 +468,11 @@ sub _sign {
 
     $args{$key} = $o_args{$key};
   }
+
+  $args{Action}  = $action;
+  $args{Version} = $self->{__version};
+
+  return %args;
 
   my %sign_hash = (
     AWSAccessKeyId   => $self->{"__access_key"},
@@ -510,7 +533,7 @@ sub _xml {
           . ")" );
     }
 
-    die( join( "\n", @error_msg ) );
+    confess( join( "\n", @error_msg ) );
   }
 
   return $res;

@@ -20,7 +20,8 @@ use Rex::Commands::Gather;
 use Rex::Virtualization::LibVirt::info;
 use Rex::Interface::File;
 use Rex::Interface::Exec;
-use JSON::XS;
+use JSON::MaybeXS;
+require Rex::Commands::Run;
 
 sub execute {
   my ( $class, $vmname ) = @_;
@@ -132,14 +133,18 @@ sub execute {
 
     my $got_ip = 0;
 
-    my $command = operating_system_is("Gentoo") ? '/sbin/arp' : '/usr/sbin/arp';
+    # search arp in different locations.
+    # sometimes there is not PATH for normal users to /sbin commands.
+    # and also arp can be in different locations.
+    my $command =
+      Rex::Commands::Run::can_run( "/sbin/arp", "/usr/sbin/arp", "arp" );
 
     while ( $got_ip < scalar( keys %{$ifs} ) ) {
       my %arp =
         map {
         my @x = ( $_ =~ m/\(([^\)]+)\) at ([^\s]+)\s/ );
         ( $x[1], $x[0] )
-        } i_run "$command -an";
+        } i_run "$command -an", fail_ok => 1;
 
       for my $if ( keys %{$ifs} ) {
         if ( exists $arp{ $ifs->{$if}->{mac} } && $arp{ $ifs->{$if}->{mac} } ) {

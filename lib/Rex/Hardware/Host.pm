@@ -46,26 +46,31 @@ sub get {
         map { /^USERDOMAIN=(.*)$/ } split( /\r?\n/, @env );
     }
     elsif ( $os eq "NetBSD" || $os eq "OpenBSD" || $os eq 'FreeBSD' ) {
-      ( $hostname, $domain ) = split( /\./, i_run("hostname"), 2 );
+      ( $hostname, $domain ) =
+        split( /\./, ( eval { i_run("hostname") } || "unknown.nodomain" ), 2 );
     }
     elsif ( $os eq "SunOS" ) {
-      ($hostname) = map { /^([^\.]+)$/ } i_run("hostname");
-      ($domain) = i_run("domainname");
+      ($hostname) =
+        map { /^([^\.]+)$/ } ( eval { i_run("hostname"); } || "unknown" );
+      ($domain) = eval { i_run("domainname"); } || ("nodomain");
     }
     elsif ( $os eq "OpenWrt" ) {
-      ($hostname) = i_run("uname -n");
-      ($domain)   = i_run("cat /proc/sys/kernel/domainname");
+      ($hostname) = eval { i_run("uname -n"); } || ("unknown");
+      ($domain) =
+        eval { i_run("cat /proc/sys/kernel/domainname"); } || ("unknown");
     }
     else {
-      my @out = i_run("hostname -f 2>/dev/null");
-      ( $hostname, $domain ) =
-        split( /\./, i_run("hostname -f 2>/dev/null"), 2 );
+      my @out = i_run "hostname -f 2>/dev/null", fail_ok => 1;
 
-      if ( !$hostname || $hostname eq "" ) {
+      if ( $? == 0 ) {
+        ( $hostname, $domain ) = split( /\./, $out[0], 2 );
+      }
+      else {
         Rex::Logger::debug(
           "Error getting hostname and domainname. There is something wrong with your /etc/hosts file."
         );
-        $hostname = i_run("hostname");
+        ($hostname) = eval { i_run("hostname -s"); } || ("unknown");
+        ($domain)   = eval { i_run("hostname -d"); } || ("nodomain");
       }
     }
 
@@ -74,8 +79,8 @@ sub get {
       manufacturer => $bios->get_system_information()->get_manufacturer() || "",
       hostname     => $hostname                                           || "",
       domain       => $domain                                             || "",
-      operatingsystem  => $os || "",
-      operating_system => $os || "",
+      operatingsystem          => $os                                     || "",
+      operating_system         => $os                                     || "",
       operatingsystemrelease   => get_operating_system_version(),
       operating_system_release => get_operating_system_version(),
       kernelname               => [ i_run "uname -s" ]->[0],
@@ -108,8 +113,11 @@ sub get_operating_system {
 
   if ($is_lsb) {
     if ( my $ret = i_run "lsb_release -s -i" ) {
-      if ( $ret eq "SUSE LINUX" || $ret eq "openSUSE project" ) {
+      if ( $ret =~ m/SUSE/i ) {
         $ret = "SuSE";
+      }
+      elsif ( $ret eq "ManjaroLinux" ) {
+        $ret = "Manjaro";
       }
       return $ret;
     }
@@ -132,7 +140,7 @@ sub get_operating_system {
     return "Debian";
   }
 
-  if ( is_file("/etc/SuSE-release") ) {
+  if ( is_file("/etc/SuSE-release") or is_file("/etc/SUSE-brand") ) {
     return "SuSE";
   }
 
@@ -173,6 +181,14 @@ sub get_operating_system {
     return "OpenWrt";
   }
 
+  if ( is_file("/etc/arch-release") ) {
+    return "Arch";
+  }
+
+  if ( is_file("/etc/manjaro-release") ) {
+    return "Manjaro";
+  }
+
   my $os_string = i_run("uname -s");
   return $os_string; # return the plain os
 
@@ -196,7 +212,7 @@ sub get_operating_system_version {
   if ($is_lsb) {
     if ( my $ret = i_run "lsb_release -r -s" ) {
       my $os_check = i_run "lsb_release -d";
-      unless ( $os_check =~ m/SUSE\sLinux\sEnterprise\sServer/ ) {
+      unless ( $os_check =~ m/SUSE\sLinux\sEnterprise/ ) {
         return $ret;
       }
     }
@@ -214,7 +230,7 @@ sub get_operating_system_version {
 
   }
   elsif ( $op eq "Ubuntu" ) {
-    my @l = i_run "lsb_release -r -s";
+    my @l = i_run "lsb_release -r -s", fail_ok => 1;
     return $l[0];
   }
   elsif ( lc($op) eq "redhat"
@@ -260,16 +276,22 @@ sub get_operating_system_version {
 
     my ( $version, $release );
 
-    my $fh      = file_read("/etc/SuSE-release");
+    my $release_file;
+    if ( is_file("/etc/os-release") ) {
+      $release_file = "/etc/os-release";
+    }
+    else {
+      $release_file = "/etc/SuSE-release";
+    }
+
+    my $fh      = file_read($release_file);
     my $content = $fh->read_all;
     $fh->close;
 
     chomp $content;
 
-    if ( $content =~ m/SUSE\sLinux\sEnterprise\sServer/m ) {
-      ( $version, $release ) =
-        $content =~ m/VERSION\s=\s(\d+)\nPATCHLEVEL\s=\s(\d+)/m;
-      $version = "$version.$release";
+    if ( $content =~ m/VERSION_ID/m ) {
+      ($version) = $content =~ m/VERSION_ID="(\d+(?:\.)?\d+)"/m;
     }
     else {
       ($version) = $content =~ m/VERSION = (\d+\.\d+)/m;
@@ -302,6 +324,15 @@ sub get_operating_system_version {
     chomp $content;
 
     return $content;
+  }
+  elsif ( $op eq "Arch" ) {
+    my $available_updates = i_run "checkupdates", fail_ok => 1;
+    if ( $available_updates eq "" ) {
+      return "latest";
+    }
+    else {
+      return "outdated";
+    }
   }
 
   return [ i_run("uname -r") ]->[0];

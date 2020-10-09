@@ -12,14 +12,16 @@ use warnings;
 # VERSION
 
 use FindBin;
-use File::Basename;
+use File::Basename qw(basename dirname);
 use Time::HiRes qw(gettimeofday tv_interval);
 use Cwd qw(getcwd);
 use List::Util qw(max);
 use Text::Wrap;
 use Term::ReadKey;
+use Sort::Naturally;
 
 use Rex;
+use Rex::Args;
 use Rex::Config;
 use Rex::Group;
 use Rex::Batch;
@@ -33,9 +35,9 @@ my $no_color = 0;
 eval "use Term::ANSIColor";
 if ($@) { $no_color = 1; }
 
-# no colors under windows
 if ( $^O =~ m/MSWin/ ) {
-  $no_color = 1;
+  eval "use Win32::Console::ANSI";
+  if ($@) { $no_color = 1; }
 }
 
 # preload some modules
@@ -49,8 +51,6 @@ if ( $#ARGV < 0 ) {
   @ARGV = qw(-h);
 }
 
-require Rex::Args;
-
 sub new {
   my $that  = shift;
   my $proto = ref($that) || $that;
@@ -62,43 +62,9 @@ sub new {
 }
 
 sub __run__ {
-
   my ( $self, %more_args ) = @_;
 
-  Rex::Args->import(
-    C => {},
-    c => {},
-    q => {},
-    Q => {},
-    F => {},
-    T => {},
-    h => {},
-    v => {},
-    d => {},
-    s => {},
-    m => {},
-    y => {},
-    w => {},
-    S => { type => "string" },
-    E => { type => "string" },
-    o => { type => "string" },
-    f => { type => "string" },
-    M => { type => "string" },
-    b => { type => "string" },
-    e => { type => "string" },
-    H => { type => "string" },
-    u => { type => "string" },
-    p => { type => "string" },
-    P => { type => "string" },
-    K => { type => "string" },
-    G => { type => "string" },
-    g => { type => "string" },
-    z => { type => "string" },
-    O => { type => "string" },
-    t => { type => "string" },
-    %more_args,
-  );
-
+  Rex::Args->parse_rex_opts;
   %opts = Rex::Args->getopts;
 
   if ( $opts{'Q'} ) {
@@ -211,178 +177,25 @@ FORCE_SERVER: {
     Rex::Output->get( $opts{'o'} );
   }
 
-  # Load Rexfile before exec in order to suppport group exec
-  if ( -f $::rexfile ) {
-    Rex::Logger::debug("$::rexfile exists");
+  handle_lock_file($::rexfile);
 
-    Rex::Logger::debug("Checking Rexfile Syntax...");
+  Rex::Config->set_environment( $opts{"E"} ) if ( $opts{"E"} );
 
-    if ( !exists $ENV{PAR_TEMP} ) {
+  if ( $opts{'g'} || $opts{'G'} ) {
 
-      # don't check syntax under PAR
+    #$::FORCE_SERVER = "\0" . $opts{'g'};
+    $opts{'g'} ||= $opts{'G'};
 
-      my $out =
-        qx{$^X -MRex::Commands -MRex::Commands::Run -MRex::Commands::Fs -MRex::Commands::Download -MRex::Commands::Upload -MRex::Commands::File -MRex::Commands::Gather -MRex::Commands::Kernel -MRex::Commands::Pkg -MRex::Commands::Service -MRex::Commands::Sysctl -MRex::Commands::Tail -MRex::Commands::Process -c $::rexfile 2>&1};
-      if ( $? > 0 ) {
-        print $out;
-      }
-
-      if ( $? != 0 ) {
-        exit 1;
-      }
-
-    }
-
-    if ( $^O !~ m/^MSWin/ ) {
-      if ( -f "$::rexfile.lock" && !exists $opts{'F'} ) {
-        Rex::Logger::debug("Found $::rexfile.lock");
-        my $pid = eval { local ( @ARGV, $/ ) = ("$::rexfile.lock"); <>; };
-        system(
-          "ps aux | awk -F' ' ' { print \$2 } ' | grep $pid >/dev/null 2>&1");
-        if ( $? == 0 ) {
-          Rex::Logger::info("Rexfile is in use by $pid.");
-          CORE::exit 1;
-        }
-        else {
-          Rex::Logger::debug("Found stale lock file. Removing it.");
-          Rex::global_sudo(0);
-          CORE::unlink("$::rexfile.lock");
-        }
-      }
-
-      Rex::Logger::debug("Creating lock-file ($::rexfile.lock)");
-      open( my $f, ">", "$::rexfile.lock" ) or die($!);
-      print $f $$;
-      close($f);
+    if ( ref $opts{'g'} ne "ARRAY" ) {
+      $::FORCE_SERVER = [ $opts{'g'} ];
     }
     else {
-      Rex::Logger::debug("Running on windows. Disabled syntax checking.");
-      Rex::Logger::debug("Running on windows. Disabled lock file support.");
+      $::FORCE_SERVER = $opts{'g'};
     }
-
-    Rex::Logger::debug("Including/Parsing $::rexfile");
-
-    Rex::Config->set_environment( $opts{"E"} ) if ( $opts{"E"} );
-
-    if ( $opts{'g'} || $opts{'G'} ) {
-
-      #$::FORCE_SERVER = "\0" . $opts{'g'};
-      $opts{'g'} ||= $opts{'G'};
-
-      if ( ref $opts{'g'} ne "ARRAY" ) {
-        $::FORCE_SERVER = [ $opts{'g'} ];
-      }
-      else {
-        $::FORCE_SERVER = $opts{'g'};
-      }
-    }
-
-    if ( -f "vars.db" ) {
-      CORE::unlink("vars.db");
-    }
-
-    if ( -f "vars.db.lock" ) {
-      CORE::unlink("vars.db.lock");
-    }
-
-    eval {
-      my $env             = environment;
-      my $ini_dir         = dirname($::rexfile);
-      my $server_ini_file = "$ini_dir/server.$env.ini";
-      $server_ini_file = "$ini_dir/server.ini"
-        if !-f $server_ini_file;
-      if ( -f $server_ini_file && Rex::Group::Lookup::INI->is_loadable ) {
-        Rex::Group::Lookup::INI::groups_file($server_ini_file);
-      }
-      my $ok = do($::rexfile);
-
-      if ( !$ok ) {
-
-        # read rexfile
-        my $content = eval { local ( @ARGV, $/ ) = ($::rexfile); <>; };
-
-        # and try to evaluate it
-        my @rex_code = ("package Rex::Test::Rexfile::Syntax;");
-        if ( $content !~ m/use Rex \-.*;/ ) {
-          push @rex_code, "use Rex -base;";
-        }
-        push @rex_code, "my \$b=\$Rex::Commands::dont_register_tasks;";
-        push @rex_code, "\$Rex::Commands::dont_register_tasks = 1;";
-        push @rex_code, "our \$syntax_check = 1;";
-        push @rex_code, "$content";
-        push @rex_code, "\$Rex::Commands::dont_register_tasks = \$b;";
-        push @rex_code, "1;";
-
-        eval join( "\n", @rex_code );
-
-        if ($@) {
-          $ok = 0;
-        }
-        else {
-          Rex::Logger::debug(
-            "We can't load your Rexfile but the syntax seems to be correct.");
-          Rex::Logger::debug(
-            "This happens if the Rexfile doesn't return a true value.");
-          Rex::Logger::debug(
-            "Please append a '1;' at the very end of your Rexfile.");
-          $ok = 1;
-        }
-      }
-
-      Rex::Logger::debug("eval your Rexfile.");
-      if ( !$ok ) {
-        Rex::Logger::info(
-          "There seems to be an error on some of your required files. $@",
-          "error" );
-
-        if ( !exists $ENV{PAR_TEMP} ) {
-
-          my @dir = ( dirname($::rexfile) );
-          for my $d (@dir) {
-            opendir( my $dh, $d ) or die($!);
-            while ( my $entry = readdir($dh) ) {
-              if ( $entry =~ m/^\./ ) {
-                next;
-              }
-
-              if ( -d "$d/$entry" ) {
-                push( @dir, "$d/$entry" );
-                next;
-              }
-
-              if ( $entry =~ m/Rexfile/ || $entry =~ m/\.pm$/ ) {
-
-                # check files for syntax errors
-                my $check_out =
-                  qx{$^X -MRex::Commands -MRex::Commands::Run -MRex::Commands::Fs -MRex::Commands::Download -MRex::Commands::Upload -MRex::Commands::File -MRex::Commands::Gather -MRex::Commands::Kernel -MRex::Commands::Pkg -MRex::Commands::Service -MRex::Commands::Sysctl -MRex::Commands::Tail -MRex::Commands::Process -c $d/$entry 2>&1};
-                if ( $? > 0 ) {
-                  print "$d/$entry\n";
-                  print
-                    "--------------------------------------------------------------------------------\n";
-                  print $check_out;
-                  print "\n";
-                }
-              }
-            }
-            closedir($dh);
-          }
-
-        }
-
-        exit 1;
-      }
-    };
-
-    if ($@) { print $@ . "\n"; exit 1; }
-
   }
-  else {
-    Rex::Logger::info( "No Rexfile found.", "warn" );
-    Rex::Logger::info(
-      "Please create a file named 'Rexfile' inside this directory,", "warn" );
-    Rex::Logger::info( "or specify the file you want to use with:", "warn" );
-    Rex::Logger::info( "   rex -f file_to_use task_to_run",         "warn" );
-  }
+
+  load_server_ini_file($::rexfile);
+  load_rexfile($::rexfile);
 
   #### check if some parameters should be overwritten from the command line
 CHECK_OVERWRITE: {
@@ -413,7 +226,6 @@ CHECK_OVERWRITE: {
       Rex::Commands::private_key( $opts{'P'} );
 
       for my $task ( Rex::TaskList->create()->get_tasks ) {
-        $task->set_auth( "private_key", $opts{'P'} );
         Rex::TaskList->create()->get_task($task)
           ->set_auth( "private_key", $opts{'P'} );
       }
@@ -472,7 +284,7 @@ CHECK_OVERWRITE: {
 
     Rex::global_sudo(0);
     Rex::Logger::debug("Removing lockfile") if ( !exists $opts{'F'} );
-    CORE::unlink("$::rexfile.lock") if ( !exists $opts{'F'} );
+    CORE::unlink("$::rexfile.lock")         if ( !exists $opts{'F'} );
     CORE::exit 0;
   }
 
@@ -544,44 +356,27 @@ CHECK_OVERWRITE: {
 
     Rex::TaskList->create()->create_task( "eval-line", @params );
     Rex::Commands::do_task("eval-line");
-    CORE::exit(0);
+    exit_rex();
   }
   elsif ( $opts{'M'} ) {
     Rex::Logger::debug( "Loading Rex-Module: " . $opts{'M'} );
     my $mod = $opts{'M'};
     $mod =~ s{::}{/}g;
-    require "$mod.pm";
+    $mod .= ".pm";
+    require $mod;
   }
 
-  eval {
-    if ( $opts{'b'} ) {
-      Rex::Logger::debug( "Running batch: " . $opts{'b'} );
-      my $batch = $opts{'b'};
-      if ( Rex::Batch->is_batch($batch) ) {
-        Rex::Batch->run($batch);
-      }
-    }
+  my $run_list = Rex::RunList->instance;
 
-    if ( defined $ARGV[0] ) {
-      for my $task (@ARGV) {
-        if ( Rex::TaskList->create()->is_task($task) ) {
-          Rex::Logger::debug("Running task: $task");
-          Rex::TaskList->run($task);
-        }
-        elsif ( $task =~ m/^\-\-/ || $task =~ m/=/ ) {
+  if ( $opts{'b'} ) {
+    my $batch = $opts{'b'};
+    Rex::Logger::debug("Running batch: $batch");
+    $run_list->add_task($_) for Rex::Batch->get_batch($batch);
+  }
 
-          # skip, is parameter
-        }
-        else {
-          Rex::Logger::info(
-            "No task named '$task' found. Task names are case sensitive and the module delimiter is a single colon.",
-            "error"
-          );
-        }
-      }
-    }
-  };
+  $run_list->parse_opts(@ARGV);
 
+  eval { $run_list->run_tasks };
   if ($@) {
 
     # this is always the child
@@ -589,49 +384,7 @@ CHECK_OVERWRITE: {
     CORE::exit(0);
   }
 
-  my @exit_codes;
-
-  if ($Rex::WITH_EXIT_STATUS) {
-    @exit_codes = Rex::TaskList->create()->get_exit_codes();
-  }
-
-  #print ">> $$\n";
-  #print Dumper(\@exit_codes);
-  # lock loeschen
-  Rex::global_sudo(0);
-  Rex::Logger::debug("Removing lockfile") if ( !exists $opts{'F'} );
-  CORE::unlink("$::rexfile.lock") if ( !exists $opts{'F'} );
-
-  # delete shared variable db
-  if ( -f "vars.db" ) {
-    CORE::unlink("vars.db");
-  }
-
-  if ( -f "vars.db.lock" ) {
-    CORE::unlink("vars.db.lock");
-  }
-
-  select STDOUT;
-
-  for my $exit_hook (@exit) {
-    &$exit_hook();
-  }
-
-  if ( $opts{'o'} && defined( Rex::Output->get ) ) {
-    Rex::Output->get->write();
-    IPC::Shareable->clean_up_all();
-  }
-
-  if ($Rex::WITH_EXIT_STATUS) {
-    for my $exit_code (@exit_codes) {
-      if ( $exit_code != 0 ) {
-        exit($exit_code);
-      }
-    }
-  }
-  else {
-    exit(0);
-  }
+  exit_rex();
 }
 
 sub _print_color {
@@ -675,6 +428,7 @@ sub __help__ {
   printf $fmt, "-Q",   "Really quiet: output nothing";
   print "\n";
   printf $fmt, "-T",  "List tasks";
+  printf $fmt, "-Ta", "List all tasks, including hidden";
   printf $fmt, "-Tm", "List tasks in machine-readable format";
   printf $fmt, "-Tv", "List tasks verbosely";
   printf $fmt, "-Ty", "List tasks in YAML format";
@@ -730,7 +484,14 @@ sub _handle_T {
 sub _list_tasks {
   Rex::Logger::debug("Listing Tasks");
 
-  my @tasks = Rex::TaskList->create()->get_tasks;
+  my @tasks;
+  if ( $opts{'a'} ) {
+    @tasks = sort Rex::TaskList->create()->get_all_tasks(qr/.*/);
+  }
+  else {
+    @tasks = Rex::TaskList->create()->get_tasks;
+  }
+
   if ( defined $ARGV[0] ) {
     @tasks = grep { $_ =~ /^$ARGV[0]/ } @tasks;
 
@@ -783,7 +544,7 @@ sub _list_batches {
 
   _print_color( "Batches\n", 'yellow' );
   my $max_batch_len = max map { length } @batchs;
-  my $fmt = " %-" . $max_batch_len . "s  %s\n";
+  my $fmt           = " %-" . $max_batch_len . "s  %s\n";
 
   for my $batch ( sort @batchs ) {
     my $description = Rex::Batch->get_desc($batch);
@@ -809,7 +570,7 @@ sub _list_envs {
 
   _print_color( "Environments\n", "yellow" ) if scalar @envs;
   my $max_env_len = max map { length $_->{name} } @envs;
-  my $fmt = " %-" . $max_env_len . "s  %s\n";
+  my $fmt         = " %-" . $max_env_len . "s  %s\n";
 
   for my $e ( sort @envs ) {
     my $output = sprintf $fmt, $e->{name}, $e->{description};
@@ -828,14 +589,243 @@ sub _list_groups {
 
   _print_color( "Server Groups\n", "yellow" );
   my $max_group_len = max map { length } @group_names;
-  my $fmt = " %-" . $max_group_len . "s  %s\n";
+  my $fmt           = " %-" . $max_group_len . "s  %s\n";
 
   for my $group_name (@group_names) {
-    my $hosts = join( ", ", sort @{ $groups{$group_name} } );
+    my $hosts  = join( ", ", sort @{ $groups{$group_name} } );
     my $output = sprintf $fmt, $group_name, $hosts;
     my $indent = " " x $max_group_len . "   ";
     print wrap( "", $indent, $output );
   }
 }
+
+sub summarize {
+  my ($signal) = @_;
+  my %opts = Rex::Args->getopts;
+  return if $opts{'T'};
+
+  my @summary = Rex::TaskList->create()->get_summary();
+  return unless @summary; # no tasks ran -- nothing to summarize
+
+  my @failures = grep { $_->{exit_code} != 0 } @summary;
+
+  if ( !@failures ) {
+    Rex::Logger::info("All tasks successful on all hosts");
+    return;
+  }
+
+  Rex::Logger::info( @failures . " out of " . @summary . " task(s) failed:",
+    "error" );
+
+  foreach (
+    sort {
+           ncmp( $a->{task}, $b->{task} )
+        || ncmp( $a->{server}, $b->{server} )
+    } @failures
+    )
+  {
+    Rex::Logger::info( "\t$_->{task} failed on $_->{server}", "error" );
+    if ( $_->{error_message} ) {
+      for my $line ( split( $/, $_->{error_message} ) ) {
+        Rex::Logger::info( "\t\t$line", "error" );
+      }
+    }
+  }
+}
+
+sub handle_lock_file {
+  my $rexfile = shift;
+
+  if ( $^O !~ m/^MSWin/ ) {
+    if ( -f "$rexfile.lock" && !exists $opts{'F'} ) {
+      Rex::Logger::debug("Found $rexfile.lock");
+      my $pid = eval { local ( @ARGV, $/ ) = ("$rexfile.lock"); <>; };
+      system(
+        "ps aux | awk -F' ' ' { print \$2 } ' | grep $pid >/dev/null 2>&1");
+      if ( $? == 0 ) {
+        Rex::Logger::info("Rexfile is in use by $pid.");
+        CORE::exit 1;
+      }
+      else {
+        Rex::Logger::debug("Found stale lock file. Removing it.");
+        Rex::global_sudo(0);
+        CORE::unlink("$rexfile.lock");
+      }
+    }
+
+    Rex::Logger::debug("Creating lock-file ($rexfile.lock)");
+    open( my $f, ">", "$rexfile.lock" ) or die($!);
+    print $f $$;
+    close($f);
+  }
+  else {
+    Rex::Logger::debug("Running on windows. Disabled lock file support.");
+  }
+}
+
+sub load_server_ini_file {
+  my $rexfile = shift;
+
+  # load server ini file
+  my $env             = environment;
+  my $ini_dir         = dirname($rexfile);
+  my $server_ini_file = "$ini_dir/server.$env.ini";
+  $server_ini_file = "$ini_dir/server.ini" unless -f $server_ini_file;
+
+  if ( -f $server_ini_file && Rex::Group::Lookup::INI->is_loadable ) {
+    Rex::Logger::debug("Loading $server_ini_file");
+    Rex::Group::Lookup::INI::groups_file($server_ini_file);
+  }
+}
+
+sub load_rexfile {
+  my $rexfile = shift;
+  Rex::Logger::debug("Loading $rexfile");
+
+  if ( !-f $rexfile ) {
+    if ( !exists $opts{'e'} ) {
+      Rex::Logger::info( "No Rexfile found.", "warn" );
+      Rex::Logger::info( "Create a file named 'Rexfile' in this directory,",
+        "warn" );
+      Rex::Logger::info( "or specify the file you want to use with:", "warn" );
+      Rex::Logger::info( "   rex -f file_to_use task_to_run",         "warn" );
+    }
+    return;
+  }
+
+  my $rexfile_dir = dirname $rexfile;
+  my @new_inc     = Rex::generate_inc($rexfile_dir);
+  @INC = @new_inc;
+
+  # load Rexfile
+  eval {
+
+    # add a true return value at the end of $rexfile.
+    # we need to do this because perl want a "true" value
+    # at the end of a file that is loaded.
+    unshift @INC, sub {
+      my $load_file = $_[1];
+      if ( $load_file eq "__Rexfile__.pm" ) {
+        open( my $fh, "<", $rexfile ) or die("Error can't open $rexfile: $!");
+        my @content = <$fh>;
+        close($fh);
+        chomp @content;
+
+        my $i         = 0;
+        my $found_end = 0;
+
+        # some rexfile has a __DATA__ or __END__ section
+        # and we need to add the true value before those sections.
+        for my $line (@content) {
+          if ( $line =~ m/^__(DATA|END)__$/ ) {
+            splice( @content, $i, 0, "42;" );
+            $found_end++;
+            last;
+          }
+          $i++;
+        }
+
+        # we didn't found __DATA__ or __END__ so we just add
+        # it at the end.
+        if ( $found_end == 0 ) {
+          push @content, "42;";
+        }
+
+        # we can't remove this load from @INC because on perl 5.8
+        # this causes a crash
+        #shift @INC; # remove this loader from @INC
+
+        # we can't directly return a scalar reference because perl 5.8
+        # needs a filehandle. so we create a virtual filehandle...
+        my $c = join( "\n", @content );
+        open( my $rex_fh, "<", \$c );
+        return $rex_fh;
+      }
+    };
+
+    my ( $stdout, $stderr, $default_stderr );
+    open $default_stderr, ">&", STDERR;
+
+    # we close STDERR here because we don't want to see the
+    # normal perl error message on the screen. Instead we print
+    # the error message in the catch-if below.
+    local *STDERR;
+    open( STDERR, ">>", \$stderr );
+
+    # we can't use $rexfile here, because if the variable contains dots
+    # the perl interpreter try to load the file directly without using @INC
+    # so we just fake a module name.
+    require __Rexfile__;
+
+    # update %INC so that we can later use it to find the rexfile
+    $INC{"__Rexfile__.pm"} = $rexfile;
+
+    # reopen STDERR
+    open STDERR, ">&", $default_stderr;
+
+    if ($stderr) {
+      my @lines = split( $/, $stderr );
+      Rex::Logger::info( "You have some code warnings:", 'warn' );
+      Rex::Logger::info( "\t$_",                         'warn' ) for @lines;
+    }
+
+    1;
+  };
+
+  if ($@) {
+    my $e = $@;
+    chomp $e;
+
+    # remove the strange path to the Rexfile which exists because
+    # we load the Rexfile via our custom code block.
+    $e =~ s|/loader/[^/]+/||smg;
+
+    my @lines = split( $/, $e );
+
+    Rex::Logger::info( "Compile time errors:", 'error' );
+    Rex::Logger::info( "\t$_",                 'error' ) for @lines;
+
+    exit 1;
+  }
+}
+
+sub exit_rex {
+  my ( $exit_code_override, $signal ) = @_;
+
+  summarize($signal) if !$signal;
+
+  Rex::global_sudo(0);
+  Rex::Logger::debug("Removing lockfile") if !exists $opts{'F'};
+  unlink("$::rexfile.lock")               if !exists $opts{'F'};
+
+  select STDOUT;
+
+  if ( !$signal && $opts{'o'} && defined( Rex::Output->get ) ) {
+    Rex::Output->get->write();
+    IPC::Shareable->clean_up_all();
+  }
+
+  for my $exit_hook (@exit) {
+    $exit_hook->( $exit_code_override, $signal );
+  }
+
+  if ($Rex::WITH_EXIT_STATUS) {
+    CORE::exit($exit_code_override) if defined $exit_code_override;
+
+    my @exit_codes = Rex::TaskList->create()->get_exit_codes();
+    for my $exit_code (@exit_codes) {
+      $exit_code = $exit_code >> 8 if $exit_code > 255;
+      CORE::exit($exit_code)       if $exit_code != 0;
+    }
+  }
+
+  CORE::exit(0);
+}
+
+# we capture CTRL+C so we can cleanup vars files
+# and give modules the chance to also do cleanup
+$SIG{INT} = sub {
+  exit_rex( 1, "INT" );
+};
 
 1;

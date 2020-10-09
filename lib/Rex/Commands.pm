@@ -1,4 +1,4 @@
-#
+
 # (c) Jan Gehring <jan.gehring@gmail.com>
 #
 # vim: set ts=2 sw=2 tw=0:
@@ -121,6 +121,10 @@ use Rex::Profiler;
 use Rex::Report;
 use Rex;
 use Rex::Helper::Misc;
+use Rex::RunList;
+use Symbol;
+
+use Carp;
 
 use vars
   qw(@EXPORT $current_desc $global_no_ssh $environments $dont_register_tasks $profiler %auth_late);
@@ -240,7 +244,7 @@ sub task {
 
   if ( !@_ ) {
     if ( my $t = Rex::get_current_connection ) {
-      return $t->{task};
+      return $t->{task}->[-1];
     }
     return;
   }
@@ -314,118 +318,38 @@ sub task {
     push( @_, "" );
   }
 
-  no strict 'refs';
-  no warnings;
-  push( @{"${class}::tasks"}, { name => $task_name_save, code => $_[-2] } );
-  use strict;
-  use warnings;
+  my $ref_to_tasks = qualify_to_ref( 'tasks', $class );
+  push( @{ *{$ref_to_tasks} }, { name => $task_name_save, code => $_[-2] } );
+
+  $options->{'dont_register'} ||= $dont_register_tasks;
+  my $task_o = Rex::TaskList->create()->create_task( $task_name, @_, $options );
 
   if (!$class->can($task_name_save)
     && $task_name_save =~ m/^[a-zA-Z_][a-zA-Z0-9_]+$/ )
   {
-    no strict 'refs';
-    Rex::Logger::debug("Registering task: ${class}::$task_name_save");
+    Rex::Logger::debug("Registering task: $task_name");
+    my $code        = $_[-2];
+    my $ref_to_task = qualify_to_ref( $task_name_save, $class );
+    *{$ref_to_task} = sub {
+      Rex::Logger::info("Running task $task_name on current connection");
+      my $param;
 
-    my $code = $_[-2];
-    *{"${class}::$task_name_save"} = sub {
-      Rex::Logger::info("Running task $task_name_save on current connection");
-
-      Rex::Hook::run_hook( task => "before_execute", $task_name_save, @_ );
-
-      if ( Rex::Config->get_task_call_by_method
-        && $_[0]
-        && $_[0] =~ m/^[A-Za-z0-9_:]+$/
-        && ref $_[1] eq "HASH" )
-      {
-        shift;
+      if ( scalar @_ == 1 && ref $_[0] eq "HASH" ) {
+        $param = $_[0];
       }
-
-      my @ret;
-      if ( ref( $_[0] ) eq "HASH" ) {
-        if (wantarray) {
-          @ret = $code->(@_);
-        }
-        else {
-          my $t = $code->(@_);
-          @ret = ($t);
-        }
+      elsif ( $REGISTER_SUB_HASH_PARAMETER && scalar @_ % 2 == 0 ) {
+        $param = {@_};
       }
       else {
-        if ( $REGISTER_SUB_HASH_PARAMETER && scalar @_ % 2 == 0 ) {
-          if (wantarray) {
-            @ret = $code->( {@_} );
-          }
-          else {
-            my $t = $code->( {@_} );
-            @ret = ($t);
-          }
-        }
-        else {
-          if (wantarray) {
-            @ret = $code->(@_);
-          }
-          else {
-            my $t = $code->(@_);
-            @ret = ($t);
-          }
-        }
+        $param = \@_;
       }
 
-      Rex::Hook::run_hook( task => "after_execute", $task_name_save, @_ );
-
-      if (wantarray) {
-        return @ret;
-      }
-      else {
-        return $ret[0];
-      }
+      $task_o->run( "<func>", params => $param );
     };
-    use strict;
-  }
-  elsif ( ( $class ne "main" && $class ne "Rex::CLI" )
-    && !$class->can($task_name_save)
-    && $task_name_save =~ m/^[a-zA-Z_][a-zA-Z0-9_]+$/ )
-  {
-    # if not in main namespace, register the task as a sub
-    no strict 'refs';
-    Rex::Logger::debug(
-      "Registering task (not main namespace): ${class}::$task_name_save");
-    my $code = $_[-2];
-    *{"${class}::$task_name_save"} = sub {
-      Rex::Logger::info("Running task $task_name_save on current connection");
-
-      Rex::Hook::run_hook( task => "before_execute", $task_name_save, @_ );
-
-      my @ret;
-      if ( ref( $_[0] ) eq "HASH" ) {
-        if (wantarray) {
-          @ret = $code->(@_);
-        }
-        else {
-          my $t = $code->(@_);
-          @ret = ($t);
-        }
-      }
-      else {
-        if (wantarray) {
-          @ret = $code->( {@_} );
-        }
-        else {
-          my $t = $code->( {@_} );
-          @ret = ($t);
-        }
-      }
-
-      Rex::Hook::run_hook( task => "after_execute", $task_name_save, @_ );
-
-      return @ret;
-    };
-
-    use strict;
   }
 
   $options->{'dont_register'} ||= $dont_register_tasks;
-  Rex::TaskList->create()->create_task( $task_name, @_, $options );
+  return $task_o;
 }
 
 =head2 desc($description)
@@ -453,7 +377,9 @@ Or with the expression syntax:
 
  group "servergroup", "www[1..3]", "memcache[01..03]";
 
-You can also specify server options after a server name with a hash reference:
+If the C<use_server_auth> feature flag is enabled, you can also specify server options after a server name with a hash reference:
+
+ use Rex -feature => ['use_server_auth'];
 
  group "servergroup", "www1" => { user => "other" }, "www2";
 
@@ -570,16 +496,16 @@ sub password {
 
 =head2 auth(for => $entity, %data)
 
-With this function you can modify/set special authentication parameters for tasks and groups.
-If you want to modify a group's authentication you first have to create it.
-(Place the auth command after the group.)
+With this command you can set or modify authentication parameters for tasks and groups. (Please note this is different than setting authentication details for the members of a host group. If you are looking for that, please check out the L<group|https://metacpan.org/pod/Rex::Commands#group> command.)
 
-If you want to set special login information for a group you have to activate that feature first.
+If you want to set special login information for a group you have to enable at least the C<0.31> feature flag, and ensure the C<group> is declared before the C<auth> command.
 
- use Rex -feature => 0.31; # activate setting auth for a group
+Command line options to set locality or authentication details are still taking precedence, and may override these settings.
 
  # auth for groups
  
+ use Rex -feature => ['0.31']; # activate setting auth for a group
+
  group frontends => "web[01..10]";
  group backends => "be[01..05]";
  
@@ -649,7 +575,7 @@ sub auth {
   if ( !$group ) {
     Rex::Logger::debug("No group $entity found, looking for a task.");
     if ( ref($entity) eq "Regexp" ) {
-      my @tasks = Rex::TaskList->create()->get_tasks;
+      my @tasks          = Rex::TaskList->create()->get_tasks;
       my @selected_tasks = grep { m/$entity/ } @tasks;
       for my $t (@selected_tasks) {
         auth( $_d, $t, %data );
@@ -766,15 +692,28 @@ You may also use an arrayRef for $task if you want to call multiple tasks.
 =cut
 
 sub do_task {
-  my $task = shift;
+  my $task   = shift;
+  my $params = shift;
+
+# only get all parameters if task_chaining_cmdline_args (or feature flag >= 1.4)
+# is not active.
+# since 1.4 every task can have its own arguments.
+  if ( !Rex::Config->get_task_chaining_cmdline_args ) {
+    $params ||= { Rex::Args->get };
+  }
+
+  # default is an empty hash
+  $params ||= {};
 
   if ( ref($task) eq "ARRAY" ) {
     for my $t ( @{$task} ) {
-      Rex::TaskList->run($t);
+      Rex::TaskList->create()->get_task($t) || die "Task $t not found.";
+      Rex::TaskList->run( $t, params => $params );
     }
   }
   else {
-    return Rex::TaskList->run($task);
+    Rex::TaskList->create()->get_task($task) || die "Task $task not found.";
+    return Rex::TaskList->run( $task, params => $params );
   }
 }
 
@@ -821,8 +760,12 @@ If you want to add custom parameters for the task you can do it this way.
 sub run_task {
   my ( $task_name, %option ) = @_;
 
+  my $task = Rex::TaskList->create()->get_task($task_name);
+  if ( !$task ) {
+    croak("No task named '$task_name' found.");
+  }
+
   if ( exists $option{on} ) {
-    my $task = Rex::TaskList->create()->get_task($task_name);
     if ( exists $option{params} ) {
       $task->run( $option{on}, params => $option{params} );
     }
@@ -831,7 +774,6 @@ sub run_task {
     }
   }
   else {
-    my $task = Rex::TaskList->create()->get_task($task_name);
     if ( exists $option{params} ) {
       $task->run( "<local>", params => $option{params} );
     }
@@ -1074,16 +1016,22 @@ sub needs {
   }
 
   if ( $self eq "main" ) {
-    $self = "Rex::CLI";
+    $self = ""; # Tasks in main namespace are really registered in Rex::CLI
   }
 
-  no strict 'refs';
-  my @maybe_tasks_to_run = @{"${self}::tasks"};
-  use strict;
+  my $tl = Rex::TaskList->create();
+  my @maybe_tasks_to_run;
+  if ($self) {
+    @maybe_tasks_to_run = $tl->get_all_tasks(qr{^\Q$self\E:[A-Za-z0-9_\-]+$});
+  }
+  else {
+    @maybe_tasks_to_run = $tl->get_all_tasks(qr{^[A-Za-z0-9_\-]+$});
+  }
 
   if ( !@args && !@maybe_tasks_to_run ) {
     @args = ($self);
     ($self) = caller;
+    $self = "" if ( $self =~ m/^(Rex::CLI|main)$/ );
   }
 
   if ( ref( $args[0] ) eq "ARRAY" ) {
@@ -1092,35 +1040,59 @@ sub needs {
 
   Rex::Logger::debug("need to call tasks from $self");
 
-  no strict 'refs';
-  my @tasks_to_run = @{"${self}::tasks"};
-  use strict;
+  $self =~ s/^Rex:://g;
+  $self =~ s/::/:/g;
 
-  my %opts = Rex::Args->get;
+  my @tasks_to_run;
+  if ($self) {
+    @tasks_to_run = $tl->get_all_tasks(qr{^\Q$self\E:[A-Za-z0-9_\-]+$});
+  }
+  else {
+    @tasks_to_run = $tl->get_all_tasks(qr{^[A-Za-z0-9_\-]+$});
+  }
+
+  my $run_list     = Rex::RunList->instance;
+  my $current_task = $run_list->current_task;
+  my %task_opts    = $current_task->get_opts;
+  my @task_args    = $current_task->get_args;
+
+  if ($self) {
+    my $suffix = $self;
+    $suffix =~ s/::/:/g;
+    @args = map { "$suffix:$_" } @args;
+  }
 
   for my $task (@tasks_to_run) {
-    my $task_name = $task->{"name"};
-    if ( @args && grep ( /^$task_name$/, @args ) ) {
-      Rex::Logger::debug( "Calling " . $task->{"name"} );
-      &{ $task->{"code"} }( \%opts );
+    my $task_o    = $tl->get_task($task);
+    my $task_name = $task_o->name;
+    my $suffix    = $self . ":";
+    if ( @args && grep ( /^\Q$task_name\E$/, @args ) ) {
+      Rex::Logger::debug( "Calling " . $task_o->name );
+      $task_o->run( "<func>", params => \@task_args, args => \%task_opts );
     }
     elsif ( !@args ) {
-      Rex::Logger::debug( "Calling " . $task->{"name"} );
-      &{ $task->{"code"} }( \%opts );
+      Rex::Logger::debug( "Calling " . $task_o->name );
+      $task_o->run( "<func>", params => \@task_args, args => \%task_opts );
     }
   }
 
 }
 
 # register needs in main namespace
-{
+_register_needs_in_main_namespace();
+
+sub _register_needs_in_main_namespace {
   my ($caller_pkg) = caller(1);
-  if ( $caller_pkg eq "Rex::CLI" || $caller_pkg eq "main" ) {
-    no strict 'refs';
-    *{"main::needs"} = \&needs;
-    use strict;
+
+  if ( !$caller_pkg ) {
+    ($caller_pkg) = caller(0);
   }
-};
+
+  if ( $caller_pkg && ( $caller_pkg eq "Rex::CLI" || $caller_pkg eq "main" ) ) {
+    my $ref_to_needs = qualify_to_ref( 'needs', 'main' );
+    *{$ref_to_needs} = \&needs;
+  }
+}
 
 =head2 include Module::Name
 
@@ -1235,13 +1207,16 @@ sub LOCAL (&) {
   my $cur_conn      = Rex::get_current_connection();
   my $local_connect = Rex::Interface::Connection->create("Local");
 
+  my $old_global_sudo = $Rex::GLOBAL_SUDO;
+  $Rex::GLOBAL_SUDO = 0;
+
   Rex::push_connection(
     {
       conn     => $local_connect,
       ssh      => 0,
       server   => $cur_conn->{server},
       cache    => Rex::Interface::Cache->create(),
-      task     => task(),
+      task     => [ task() ],
       reporter => Rex::Report->create( Rex::Config->get_report_type ),
       notify   => Rex::Notify->new(),
     }
@@ -1250,6 +1225,8 @@ sub LOCAL (&) {
   my $ret = $_[0]->();
 
   Rex::pop_connection();
+
+  $Rex::GLOBAL_SUDO = $old_global_sudo;
 
   return $ret;
 }
@@ -1322,13 +1299,16 @@ sub get {
 
 =head2 before($task => sub {})
 
-Run code before executing the specified task. The special taskname 'ALL' can be used to run code before all tasks.
+Run code before executing the specified task.
+
+The task name is a regular expression to find all tasks with a matching name. The special task name C<'ALL'> can also be used to run code before all tasks.
+
 If called repeatedly, each sub will be appended to a list of 'before' functions.
 
 In this hook you can overwrite the server to which the task will connect to. The second argument is a reference to the 
 server object that will be used for the connection.
 
-Note: must come after the definition of the specified task
+Please note, this must come after the definition of the specified task.
 
  before mytask => sub {
   my ($server, $server_ref, $cli_args) = @_;
@@ -1351,10 +1331,13 @@ sub before {
 
 =head2 after($task => sub {})
 
-Run code after the task is finished. The special taskname 'ALL' can be used to run code after all tasks.
+Run code after executing the specified task.
+
+The task name is a regular expression to find all tasks with a matching name. The special task name C<'ALL'> can be used to run code after all tasks.
+
 If called repeatedly, each sub will be appended to a list of 'after' functions.
 
-Note: must come after the definition of the specified task
+Please note, this must come after the definition of the specified task.
 
  after mytask => sub {
   my ($server, $failed, $cli_args) = @_;
@@ -1380,13 +1363,16 @@ sub after {
 
 =head2 around($task => sub {})
 
-Run code before and after the task is finished. The special taskname 'ALL' can be used to run code around all tasks.
+Run code around the specified task (that is both before and after executing it).
+
+The task name is a regular expression to find all tasks with a matching name. The special task name C<'ALL'> can be used to run code around all tasks.
+
 If called repeatedly, each sub will be appended to a list of 'around' functions.
 
 In this hook you can overwrite the server to which the task will connect to. The second argument is a reference to the 
 server object that will be used for the connection.
 
-Note: must come after the definition of the specified task
+Please note, this must come after the definition of the specified task.
 
  around mytask => sub {
   my ($server, $server_ref, $cli_args, $position) = @_;
@@ -1416,10 +1402,13 @@ sub around {
 
 =head2 before_task_start($task => sub {})
 
-Run code before executing the specified task. This gets executed only once for a task. The special taskname 'ALL' can be used to run code before all tasks.
-If called repeatedly, each sub will be appended to a list of 'before' functions.
+Run code before executing the specified task. This gets executed only once for a task.
 
-Note: must come after the definition of the specified task
+The task name is a regular expression to find all tasks with a matching name. The special task name C<'ALL'> can be used to run code before all tasks.
+
+If called repeatedly, each sub will be appended to a list of 'before_task_start' functions.
+
+Please note, this must come after the definition of the specified task.
 
  before_task_start mytask => sub {
    # do some things
@@ -1441,10 +1430,13 @@ sub before_task_start {
 
 =head2 after_task_finished($task => sub {})
 
-Run code after the task is finished (and after the ssh connection is terminated). This gets executed only once for a task. The special taskname 'ALL' can be used to run code before all tasks.
-If called repeatedly, each sub will be appended to a list of 'before' functions.
+Run code after the task is finished (and after the ssh connection is terminated). This gets executed only once for a task.
 
-Note: must come after the definition of the specified task
+The task name is a regular expression to find all tasks with a matching name. The special task name C<'ALL'> can be used to run code after all tasks.
+
+If called repeatedly, each sub will be appended to a list of 'after_task_finished' functions.
+
+Please note, this must come after the definition of the specified task.
 
  after_task_finished mytask => sub {
    # do some things
@@ -1529,7 +1521,7 @@ sub profiler {
   my $c_profiler = Rex::get_current_connection()->{"profiler"};
   unless ($c_profiler) {
     $c_profiler = $profiler || Rex::Profiler->new;
-    $profiler = $c_profiler;
+    $profiler   = $c_profiler;
   }
 
   return $c_profiler;

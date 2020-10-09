@@ -68,7 +68,6 @@ use warnings;
 use Data::Dumper;
 use Rex::Box::Base;
 use Rex::Commands -no => [qw/auth/];
-use Rex::Commands::Run;
 use Rex::Commands::Fs;
 use Rex::Commands::Virtualization;
 use Rex::Commands::SimpleCheck;
@@ -108,6 +107,17 @@ sub new {
   bless( $self, ref($class) || $class );
 
   return $self;
+}
+
+=head2 memory($memory_size)
+
+Sets the memory of a VM in megabyte.
+
+=cut
+
+sub memory {
+  my ( $self, $mem ) = @_;
+  $self->{memory} = $mem * 1024; # libvirt wants kilobytes
 }
 
 sub import_vm {
@@ -167,21 +177,6 @@ sub import_vm {
   }
 
   $self->{info} = vm guestinfo => $self->{name};
-}
-
-sub provision_vm {
-  my ( $self, @tasks ) = @_;
-
-  if ( !@tasks ) {
-    @tasks = @{ $self->{__tasks} };
-  }
-
-  $self->wait_for_ssh();
-
-  for my $task (@tasks) {
-    Rex::TaskList->create()->get_task($task)->set_auth( %{ $self->{__auth} } );
-    Rex::TaskList->create()->get_task($task)->run( $self->ip );
-  }
 }
 
 sub list_boxes {

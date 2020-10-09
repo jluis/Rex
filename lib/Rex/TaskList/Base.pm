@@ -11,6 +11,11 @@ use warnings;
 
 # VERSION
 
+BEGIN {
+  use Rex::Shared::Var;
+  share qw(@SUMMARY);
+}
+
 use Data::Dumper;
 use Rex::Logger;
 use Rex::Task;
@@ -30,7 +35,7 @@ sub new {
   bless( $self, $proto );
 
   $self->{IN_TRANSACTION} = 0;
-  $self->{DEFAULT_AUTH}   = 1;
+  $self->{DEFAULT_AUTH}   = Rex::Config->get_default_auth();
   $self->{tasks}          = {};
 
   return $self;
@@ -194,7 +199,7 @@ sub create_task {
     func                 => $func,
     server               => [@server],
     desc                 => $desc,
-    no_ssh               => ( $options->{"no_ssh"} ? 1 : 0 ),
+    no_ssh               => ( $options->{"no_ssh"}        ? 1 : 0 ),
     hidden               => ( $options->{"dont_register"} ? 1 : 0 ),
     exit_on_connect_fail => (
       exists $options->{exit_on_connect_fail}
@@ -227,12 +232,13 @@ sub create_task {
 
   $self->{tasks}->{$task_name} = Rex::Task->new(%task_hash);
 
+  return $self->{tasks}->{$task_name};
 }
 
 sub get_tasks {
   my $self = shift;
   return grep { $self->{tasks}->{$_}->hidden() == 0 }
-    sort      { $a cmp $b } keys %{ $self->{tasks} };
+    sort { $a cmp $b } keys %{ $self->{tasks} };
 }
 
 sub get_all_tasks {
@@ -285,81 +291,99 @@ sub is_task {
   return 0;
 }
 
+sub current_task { shift->{__current_task__} }
+
 sub run {
-  my ( $self, $task_name, %option ) = @_;
-  my $task = $self->get_task($task_name);
+  my ( $self, $task, %options ) = @_;
 
-  $option{params} ||= { Rex::Args->get };
-
-  my @all_server = @{ $task->server };
+  if ( !ref $task ) {
+    $task = Rex::TaskList->create()->get_task($task);
+  }
 
   my $fm = Rex::Fork::Manager->new( max => $self->get_thread_count($task) );
+  my $all_servers = $task->server;
 
-  for my $server (@all_server) {
+  for my $server (@$all_servers) {
+    my $child_coderef = $self->build_child_coderef( $task, $server, %options );
 
-    my $forked_sub = sub {
+    if ( $self->{IN_TRANSACTION} ) {
 
-      Rex::Logger::init();
-
-      # create a single task object for the run on $server
-
-      Rex::Logger::info("Running task $task_name on $server");
-      my $run_task = Rex::Task->new( %{ $task->get_data } );
-
-      $run_task->run(
-        $server,
-        in_transaction => $self->{IN_TRANSACTION},
-        params         => $option{params}
-      );
-
-      # destroy cached os info
-      Rex::Logger::debug("Destroying all cached os information");
-
-      Rex::Logger::shutdown();
-
-    };
-
-    # add the worker (forked_sub) to the fork queue
-    unless ( $self->{IN_TRANSACTION} ) {
-
-      # not inside a transaction, so lets fork happyly...
-      $fm->add( $forked_sub, 1 );
+      # Inside a transaction -- no forking and no chance to get zombies.
+      # This only happens if someone calls do_task() from inside a transaction.
+      $child_coderef->();
     }
     else {
-# inside a transaction, no little small funny kids, ... and no chance to get zombies :(
-      &$forked_sub();
+      # Not inside a transaction, so lets fork
+      # Add $forked_sub to the fork queue
+      $fm->add($child_coderef);
     }
-
   }
 
   Rex::Logger::debug("Waiting for children to finish");
   my $ret = $fm->wait_for_all;
-
   Rex::reconnect_lost_connections();
 
   return $ret;
 }
 
+sub build_child_coderef {
+  my ( $self, $task, $server, %options ) = @_;
+
+  return sub {
+    Rex::Logger::init();
+    Rex::Logger::info( "Running task " . $task->name . " on $server" );
+
+    my $return_value = eval {
+      $task->clone->run(
+        $server,
+        in_transaction => $self->{IN_TRANSACTION},
+        params         => $options{params},
+        args           => $options{args},
+      );
+    };
+
+    if ( $self->{IN_TRANSACTION} ) {
+      die $@ if $@;
+    }
+    else {
+      my $e         = $@;
+      my $exit_code = $@ ? ( $? || 1 ) : 0;
+
+      push @SUMMARY,
+        {
+        task          => $task->name,
+        server        => $server->to_s,
+        exit_code     => $exit_code,
+        error_message => $e,
+        };
+    }
+
+    Rex::Logger::debug("Destroying all cached os information");
+    Rex::Logger::shutdown();
+
+    return $return_value;
+  };
+}
+
 sub modify {
   my ( $self, $type, $task, $code, $package, $file, $line ) = @_;
-
-  return if defined $Rex::Test::Rexfile::Syntax::syntax_check;
 
   if ( $package ne "main" && $package ne "Rex::CLI" ) {
     if ( $task !~ m/:/ ) {
 
       #do we need to detect for base -Rex ?
       $package =~ s/^Rex:://;
-      $package =~ s/::/:/g;
     }
   }
 
+  $package =~ s/::/:/g;
+
   my @all_tasks = map { $self->get_task($_); } grep {
-    if ( $package ne "main" && $package ne "Rex::CLI" ) {
+    if ( $package ne "main" && $package ne "Rex:CLI" ) {
       $_ =~ m/^\Q$package\E:/;
     }
     else {
-      $_ !~ m/:/;
+      $_;
     }
   } $self->get_all_tasks($task);
 
@@ -396,12 +420,12 @@ sub is_transaction {
 
 sub get_exit_codes {
   my ($self) = @_;
-  return @Rex::Fork::Task::PROCESS_LIST;
+  return map { $_->{exit_code} } @SUMMARY;
 }
 
 sub get_thread_count {
   my ( $self, $task ) = @_;
-  my $threads = $task->parallelism || Rex::Config->get_parallelism;
+  my $threads      = $task->parallelism || Rex::Config->get_parallelism;
   my $server_count = scalar @{ $task->server };
 
   return $1                                if $threads =~ /^(\d+)$/;
@@ -415,5 +439,7 @@ sub get_thread_count {
   );
   return 1;
 }
+
+sub get_summary { @SUMMARY }
 
 1;

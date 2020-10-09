@@ -89,7 +89,6 @@ use warnings;
 use Data::Dumper;
 use Rex::Box::Base;
 use Rex::Commands -no => [qw/auth/];
-use Rex::Commands::Run;
 use Rex::Commands::Fs;
 use Rex::Commands::Virtualization;
 use Rex::Commands::SimpleCheck;
@@ -189,7 +188,7 @@ sub import_vm {
           Rex::Logger::debug( "Setting network bridge (dev: $nic_no) to: "
               . ( $option->{$nic_no}->{bridge} || "eth0" ) );
           vm
-            option => $self->{name},
+            option                 => $self->{name},
             "bridgeadapter$nic_no" =>
             ( $option->{$nic_no}->{bridge} || "eth0" );
         }
@@ -224,21 +223,6 @@ sub import_vm {
   }
 
   $self->{info} = vm guestinfo => $self->{name};
-}
-
-sub provision_vm {
-  my ( $self, @tasks ) = @_;
-
-  if ( !@tasks ) {
-    @tasks = @{ $self->{__tasks} } if ( exists $self->{__tasks} );
-  }
-
-  $self->wait_for_ssh();
-
-  for my $task (@tasks) {
-    Rex::TaskList->create()->get_task($task)->set_auth( %{ $self->{__auth} } );
-    Rex::TaskList->create()->get_task($task)->run( $self->ip );
-  }
 }
 
 sub select_bridge {
@@ -322,7 +306,7 @@ This method return the ip of a vm on which the ssh daemon is listening.
 sub ip {
   my ($self) = @_;
 
-  $self->{info} = vm guestinfo => $self->{name};
+  $self->{info} ||= vm guestinfo => $self->{name};
 
   if ( scalar keys %{ $self->{info} } == 0 ) { return; }
 
