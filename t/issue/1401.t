@@ -27,8 +27,9 @@ if ($win) {
   close $hello;
 }
 else {
-  #hello is a sybolic link to /usr/bin/echo
-  symlink "/usr/bin/echo", qq{$path$tail};
+  #hello is a sybolic link to
+  chomp( my $echo = qx(which echo) );
+  symlink $echo, qq{$path$tail};
 }
 
 $s = run "$path$tail $parm";
