@@ -6,10 +6,11 @@
 
 package Rex::Group::Entry::Server;
 
+use 5.010001;
 use strict;
 use warnings;
 
-# VERSION
+our $VERSION = '9999.99.99_99'; # VERSION
 
 use Rex::Logger;
 use Rex::Helper::System;
@@ -19,7 +20,7 @@ use Data::Dumper;
 use Sort::Naturally;
 use Symbol;
 
-use List::MoreUtils 0.416 qw(uniq);
+use List::Util 1.45 qw(uniq);
 
 use overload
   'eq'  => sub { shift->is_eq(@_); },

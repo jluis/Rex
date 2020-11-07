@@ -24,10 +24,11 @@ With this module you can run a command.
 
 package Rex::Commands::Run;
 
+use 5.010001;
 use strict;
 use warnings;
 
-# VERSION
+our $VERSION = '9999.99.99_99'; # VERSION
 
 #require Exporter;
 require Rex::Exporter;
@@ -182,12 +183,25 @@ sub run {
   $option->{auto_die} = Rex::Config->get_exec_autodie()
     if !exists $option->{auto_die};
 
-#  check if $cmd is an eplicit path 
-   if ( $cmd =~ m"(^(?:\.{1,2}|\~)?/.+/)(.+)" ) {
-     my ($head,$tail) = ($1,$2);
-     my $end = ($tail =~ s/(.+?)( .+)/$1/ )?$2:'';
-     $cmd = '"'.$head.$tail.'"'.$end #quote the path of comand in a compatible way
-   }
+  # We only process cmd is an explicit path that means
+  # that starts with . .. <letter>: and / or \
+  # and aren't scaped spaces or quotes
+  {
+    my $path_start = qr{(?:[.]{1,2}|[~]|\p{IsAlphabetic}:|[\\/])}msx;
+    if ( ( $cmd =~ m{^$path_start}xsm )
+      && ( $cmd !~ m{[\\^]\s|["']}xsm ) )
+    {
+
+      #https://stackoverflow.com/questions/4094699\
+      #/how-does-the-windows-command-interpreter-cmd-exe-parse-scripts\
+      #/4095133#4095133
+      my $split = qr{(?=\s$path_start|\b\d?[()?*[\]&|<>])}xsm;
+
+      my @cmd = split $split, $cmd;
+      $cmd[0] =~ s{(.*[\\/]\S*)}{"$1"}xsm;
+      $cmd = join q{}, @cmd;
+    }
+  }
 
   my $res_cmd = $cmd;
 
